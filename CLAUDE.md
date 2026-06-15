@@ -192,6 +192,8 @@ All project documentation lives in `docs/`. Key files:
 | File | Purpose |
 |------|---------|
 | `docs/TODO.md` | Implementation plan — what's done, what's next, what's blocked |
+| `docs/HLD.md` | High Level Design — architecture, components, data flow, tech choices |
+| `docs/LLD.md` | Low Level Design — database schema, API spec, service contracts, permission matrix |
 
 > `CLAUDE.md` (this file) stays at the project root — Claude Code only auto-loads it from there. All other docs go in `docs/`.
 
