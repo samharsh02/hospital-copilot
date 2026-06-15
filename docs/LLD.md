@@ -1,13 +1,56 @@
 # Hospital Copilot — Low Level Design
 
+## 0. Design Philosophy
+
+The LLD documents the concrete implementation choices — schemas, contracts, and invariants. Every decision here has a reason; this section captures the non-obvious ones so they can be defended or revisited deliberately.
+
+### Critical invariants the system must never violate
+
+These are not enforced by the database alone — they are enforced in the service layer, tested explicitly, and must survive any refactor:
+
+| Invariant | Where enforced |
+|---|---|
+| A patient may have at most one active admission at a time | `admit_patient()` checks `discharged_at IS NULL` before creating a new `Admission` |
+| A bed may only be occupied by one patient at a time | `admit_patient()` checks `bed.is_occupied` before assigning; `discharge_patient()` sets it back to `False` |
+| An event cannot be recorded against a discharged admission | `record_event()` checks `admission.discharged_at IS NULL` |
+| An event's admission must belong to its patient | `record_event()` checks `admission.patient_id == patient.pk` |
+| A workflow cannot start on an inactive template | `start_workflow()` checks `template.is_active` |
+| A workflow cannot start on a discharged admission | `start_workflow()` checks `admission.discharged_at IS NULL` |
+| Hospital scoping: a user sees only their hospital's data | Every `get_*_queryset()` applies `filter(hospital=user.hospital)` unless `SUPERADMIN` |
+| AI outputs cannot write to patient records | The `intelligence` app has no ORM write path to `patients`, `events`, or `admissions` |
+
+### Why the service layer, not database constraints?
+
+Most of the above could theoretically be expressed as partial indexes or triggers in Postgres. We chose the service layer because:
+- It is testable in isolation without a running database
+- Error messages are domain-specific (e.g. "Patient already has an active admission"), not Postgres constraint violation strings
+- The logic is readable by anyone who opens `services.py`, not hidden in a migration
+
+Database-level constraints are used for structural guarantees only (PKs, FKs, NOT NULL, unique_together).
+
+### AI contract at the service layer
+
+The `intelligence` app's service layer is the only place in the codebase where an external API call is made. Its design contract:
+
+- Input: structured data pulled from the database (events, admissions) — never raw user text
+- Output: stored as `IntelligenceRequest.response_text` with full metadata (prompt type, tokens used, latency, status)
+- Side effects: exactly one — a WebSocket push to the requesting user after the task completes
+- No write path: the service reads from `events` and `admissions`, writes only to `intelligence_requests`
+- Retry policy: 2× with exponential backoff; on final failure, `status=FAILED` is set so the client can see the query did not complete
+
+This contract ensures that even if Claude returns a hallucinated or harmful output, no data is automatically written to clinical records.
+
+---
+
 ## 1. Database Schema
 
 ### Conventions
+
 - All tables use `BigAutoField` PKs (Django default).
-- Every domain table inherits `BaseMixin` (audit timestamps + who) and where appropriate `SoftDeleteMixin` (logical delete).
+- Every domain table inherits `BaseMixin` (`created_at`, `updated_at`, `created_by_id`, `updated_by_id`). Entities that can be logically deleted also inherit `SoftDeleteMixin` (`is_deleted`, `deleted_at`, `deleted_by_id`).
 - Soft-deleted rows are excluded by the default `objects` manager; `all_objects` sees everything.
-- PII fields on Patient use `EncryptedCharField` / `EncryptedTextField` (AES-256 via `django-encrypted-model-fields`).
-- Timezone-aware datetimes throughout (`USE_TZ = True`, `TIME_ZONE = "Asia/Kolkata"`).
+- PII fields on `Patient` use `EncryptedCharField` (AES-256 via `django-encrypted-model-fields`, Fernet). These fields cannot be searched at the database level — search is done by MRN (unencrypted).
+- All datetimes are timezone-aware (`USE_TZ = True`, `TIME_ZONE = "Asia/Kolkata"`).
 
 ---
 
@@ -39,7 +82,7 @@
 | `id` | bigint | PK, auto |
 | `username` | varchar(150) | not null, unique |
 | `email` | varchar(254) | not null |
-| `password` | varchar(128) | not null (hashed) |
+| `password` | varchar(128) | not null (hashed, Django PBKDF2) |
 | `first_name` | varchar(150) | not null, default "" |
 | `last_name` | varchar(150) | not null, default "" |
 | `is_staff` | boolean | not null, default false |
@@ -51,9 +94,11 @@
 | `hospital_id` | bigint | FK → hospitals(id), nullable, SET NULL |
 | `phone` | varchar(20) | not null, default "" |
 
+**Design note:** `hospital_id` is nullable to allow SUPERADMIN users who span all hospitals. Non-SUPERADMIN users without a hospital assignment cannot see any data — the scoping filter returns an empty queryset.
+
 ---
 
-### 1.3 `patients` (apps.patients — Patient) — planned
+### 1.3 `patients` (apps.patients — Patient) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
@@ -63,17 +108,19 @@
 | `last_name` | EncryptedCharField | not null (AES-256) |
 | `date_of_birth` | date | not null |
 | `gender` | varchar(10) | not null, choices: MALE \| FEMALE \| OTHER |
-| `blood_group` | varchar(5) | nullable, choices: A+ \| A- \| B+ \| B- \| AB+ \| AB- \| O+ \| O- |
-| `contact_phone` | EncryptedCharField | nullable (AES-256) |
-| `emergency_contact_name` | varchar(200) | nullable |
-| `emergency_contact_phone` | EncryptedCharField | nullable (AES-256) |
+| `blood_group` | varchar(5) | blank, choices: A+ \| A- \| B+ \| B- \| AB+ \| AB- \| O+ \| O- |
+| `contact_phone` | EncryptedCharField | blank (AES-256) |
+| `emergency_contact_name` | varchar(200) | blank |
+| `emergency_contact_phone` | EncryptedCharField | blank (AES-256) |
 | `hospital_id` | bigint | FK → hospitals(id), not null, CASCADE |
 | `is_active` | boolean | not null, default true |
 | + BaseMixin + SoftDeleteMixin columns | | |
 
+Unique constraint: `(hospital_id, mrn)` — MRN is unique within a hospital, not globally.
+
 ---
 
-### 1.4 `wards` (apps.patients — Ward) — planned
+### 1.4 `wards` (apps.patients — Ward) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
@@ -85,7 +132,7 @@
 
 ---
 
-### 1.5 `beds` (apps.patients — Bed) — planned
+### 1.5 `beds` (apps.patients — Bed) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
@@ -97,9 +144,11 @@
 
 Unique constraint: `(ward_id, number)`.
 
+**Design note:** `is_occupied` is a denormalised flag maintained by the service layer. It is set to `True` by `admit_patient()` and `False` by `discharge_patient()`. This avoids a subquery on the admissions table for every bed list view.
+
 ---
 
-### 1.6 `admissions` (apps.patients — Admission) — planned
+### 1.6 `admissions` (apps.patients — Admission) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
@@ -112,40 +161,46 @@ Unique constraint: `(ward_id, number)`.
 | `notes` | text | blank |
 | + BaseMixin columns | | |
 
-A patient may have multiple admissions over time (one active at a time, enforced in the service layer by checking `discharged_at IS NULL`).
+A patient may have multiple admissions over time. Exactly one may be active (`discharged_at IS NULL`) at any time — enforced in `admit_patient()`.
+
+**Design note:** We do not add a database-level partial unique index on `(patient_id, discharged_at IS NULL)` in V1 because it complicates the migration and the service-layer guard with an explicit test is sufficient. This is a known trade-off.
 
 ---
 
-### 1.7 `workflow_templates` (apps.workflows — WorkflowTemplate) — planned
+### 1.7 `workflow_templates` (apps.workflows — WorkflowTemplate) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
 | `id` | bigint | PK, auto |
 | `name` | varchar(200) | not null |
 | `hospital_id` | bigint | FK → hospitals(id), not null, CASCADE |
-| `steps` | jsonb | not null — array of `{index, title, description}` |
+| `steps` | jsonb | not null — array of `{index: int, title: str, description: str}` |
 | `trigger` | varchar(20) | not null, choices: ON\_ADMIT \| ON\_DISCHARGE \| MANUAL |
 | `is_active` | boolean | not null, default true |
 | + BaseMixin + SoftDeleteMixin columns | | |
 
+**Design note:** Steps are stored as JSONB on the template rather than as a separate table. This avoids a join on every template read, allows the template to evolve without affecting existing instances (which snapshot the step titles at start time into `WorkflowStep` rows), and keeps template CRUD simple.
+
 ---
 
-### 1.8 `workflow_instances` (apps.workflows — WorkflowInstance) — planned
+### 1.8 `workflow_instances` (apps.workflows — WorkflowInstance) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
 | `id` | bigint | PK, auto |
-| `template_id` | bigint | FK → workflow\_templates(id), not null |
-| `admission_id` | bigint | FK → admissions(id), not null |
+| `template_id` | bigint | FK → workflow\_templates(id), not null, CASCADE |
+| `admission_id` | bigint | FK → admissions(id), not null, CASCADE |
 | `status` | varchar(20) | not null, choices: PENDING \| IN\_PROGRESS \| COMPLETED \| CANCELLED |
 | `assigned_to_id` | bigint | FK → users(id), nullable, SET NULL |
 | `started_at` | timestamptz | nullable |
 | `completed_at` | timestamptz | nullable |
 | + BaseMixin columns | | |
 
+Status transitions: `PENDING → IN_PROGRESS` (first step completed) `→ COMPLETED` (all steps done) or `→ CANCELLED`.
+
 ---
 
-### 1.9 `workflow_steps` (apps.workflows — WorkflowStep) — planned
+### 1.9 `workflow_steps` (apps.workflows — WorkflowStep) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
@@ -159,23 +214,29 @@ A patient may have multiple admissions over time (one active at a time, enforced
 | `notes` | text | blank |
 | + BaseMixin columns | | |
 
+Unique constraint: `(instance_id, step_index)`.
+
+**Design note:** Step rows are created from the template's JSONB at instance start time (`start_workflow()`). This means the step titles are a snapshot — changing the template later does not affect in-progress instances.
+
 ---
 
-### 1.10 `clinical_events` (apps.events — ClinicalEvent) — planned
+### 1.10 `clinical_events` (apps.events — ClinicalEvent) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
 | `id` | bigint | PK, auto |
-| `patient_id` | bigint | FK → patients(id), not null |
-| `admission_id` | bigint | FK → admissions(id), not null |
+| `patient_id` | bigint | FK → patients(id), not null, CASCADE |
+| `admission_id` | bigint | FK → admissions(id), not null, CASCADE |
 | `event_type` | varchar(20) | not null, choices: VITALS \| MEDICATION \| NURSE\_NOTE \| DOCTOR\_NOTE \| LAB\_RESULT \| ALERT \| OTHER |
 | `recorded_by_id` | bigint | FK → users(id), nullable, SET NULL |
-| `recorded_at` | timestamptz | not null, default now() |
+| `recorded_at` | timestamptz | not null, default now(), indexed |
 | `payload` | jsonb | not null — type-specific structured data |
 | `notes` | text | blank |
 | + BaseMixin columns | | |
 
-Append-only: no update/delete exposed via API. `recorded_at` indexed for timeline queries.
+Append-only: no UPDATE or DELETE is exposed via the API. `recorded_at` is indexed because it is the primary ordering key for the event timeline and for the AI context window query ("last N events before now").
+
+**Design note on payload schema:** We deliberately do not enforce a JSONB schema per event type at the database level. The flexibility allows a hospital to add custom fields (e.g. blood pressure cuff ID) without a migration. Validation can be added later at the serializer level if standardisation becomes important.
 
 ---
 
@@ -184,13 +245,21 @@ Append-only: no update/delete exposed via API. `recorded_at` indexed for timelin
 | Column | Type | Constraints |
 |--------|------|-------------|
 | `id` | bigint | PK, auto |
-| `hospital_id` | bigint | FK → hospitals(id), not null |
+| `hospital_id` | bigint | FK → hospitals(id), not null, CASCADE |
 | `name` | varchar(200) | not null |
 | `condition` | jsonb | not null — rule DSL evaluated against event payload |
 | `priority` | varchar(10) | not null, choices: LOW \| MEDIUM \| HIGH \| CRITICAL |
-| `notify_roles` | varchar[] | array of UserRole values |
+| `notify_roles` | varchar[] | array of UserRole values — which roles receive the alert push |
 | `is_active` | boolean | not null, default true |
 | + BaseMixin + SoftDeleteMixin columns | | |
+
+**Design note on the rule DSL:** The `condition` field stores a JSON expression that is evaluated against the event payload. Example:
+```json
+{"field": "payload.spo2", "op": "lt", "value": 90}
+```
+The evaluator in `escalations/services.py` supports `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, and `in`. This is intentionally simple — it is not a Turing-complete rule engine. Complex logic should be multiple rules.
+
+**Why rules and not AI for escalations:** A rule either fires or it does not. This is auditable. An ML model cannot provide that guarantee in a safety-critical context. False negatives (missed critical alerts) are unacceptable in a clinical setting; we accept a higher false positive rate from conservative rules over any false negative risk from a probabilistic model.
 
 ---
 
@@ -199,15 +268,17 @@ Append-only: no update/delete exposed via API. `recorded_at` indexed for timelin
 | Column | Type | Constraints |
 |--------|------|-------------|
 | `id` | bigint | PK, auto |
-| `rule_id` | bigint | FK → escalation\_rules(id), not null |
-| `patient_id` | bigint | FK → patients(id), not null |
-| `admission_id` | bigint | FK → admissions(id), not null |
+| `rule_id` | bigint | FK → escalation\_rules(id), not null, CASCADE |
+| `patient_id` | bigint | FK → patients(id), not null, CASCADE |
+| `admission_id` | bigint | FK → admissions(id), not null, CASCADE |
 | `triggered_at` | timestamptz | not null, auto |
 | `status` | varchar(20) | not null, choices: OPEN \| ACKNOWLEDGED \| RESOLVED |
 | `acknowledged_at` | timestamptz | nullable |
 | `acknowledged_by_id` | bigint | FK → users(id), nullable, SET NULL |
 | `resolved_at` | timestamptz | nullable |
 | + BaseMixin columns | | |
+
+Status transitions: `OPEN → ACKNOWLEDGED` (NURSE+) `→ RESOLVED` (DOCTOR+). Only DOCTOR or above can resolve — this enforces that a physician has reviewed the alert before it is closed.
 
 ---
 
@@ -216,8 +287,8 @@ Append-only: no update/delete exposed via API. `recorded_at` indexed for timelin
 | Column | Type | Constraints |
 |--------|------|-------------|
 | `id` | bigint | PK, auto |
-| `patient_id` | bigint | FK → patients(id), not null |
-| `admission_id` | bigint | FK → admissions(id), not null |
+| `patient_id` | bigint | FK → patients(id), not null, CASCADE |
+| `admission_id` | bigint | FK → admissions(id), not null, CASCADE |
 | `requested_by_id` | bigint | FK → users(id), nullable, SET NULL |
 | `prompt_type` | varchar(20) | not null, choices: SUMMARY \| RISK\_FLAG \| NEXT\_ACTION \| DRUG\_CHECK |
 | `status` | varchar(20) | not null, choices: PENDING \| COMPLETED \| FAILED |
@@ -226,6 +297,8 @@ Append-only: no update/delete exposed via API. `recorded_at` indexed for timelin
 | `latency_ms` | integer | nullable |
 | `created_at` | timestamptz | not null, auto |
 | `completed_at` | timestamptz | nullable |
+
+**Design note:** Every AI query is persisted. This creates an audit trail: which clinician asked what, with what patient context, and what Claude responded. Token counts and latency support cost monitoring and performance analysis. If a response is later disputed, the exact request can be reconstructed.
 
 ---
 
@@ -243,7 +316,7 @@ Append-only: no update/delete exposed via API. `recorded_at` indexed for timelin
 
 ---
 
-### 1.15 Entity Relationship (key relationships)
+### 1.15 Entity Relationship
 
 ```
 Hospital ──< User (hospital_id)
@@ -254,7 +327,7 @@ Hospital ──< EscalationRule (hospital_id)
 
 Patient ──< Admission (patient_id)
 Ward ──< Bed (ward_id)
-Bed ──< Admission (bed_id)          [nullable]
+Bed ──< Admission (bed_id)                  [nullable]
 
 Admission ──< WorkflowInstance (admission_id)
 Admission ──< ClinicalEvent (admission_id)
@@ -269,21 +342,29 @@ EscalationRule ──< EscalationAlert (rule_id)
 User ──< Notification (user_id)
 ```
 
+The `Admission` entity is the central hub of the clinical data model. All activity (events, workflows, alerts, AI queries) is scoped to an admission, not just a patient. This is intentional: the same patient may be admitted multiple times, and each admission is a separate clinical episode with its own timeline.
+
 ---
 
 ## 2. API Endpoint Specification
 
-All endpoints are under `/api/v1/`. Default auth: `Authorization: Bearer <access_token>`. Errors follow the shape `{"error": "<ERROR_CODE>", "message": "<human text>"}`.
+All endpoints are under `/api/v1/`. Auth: `Authorization: Bearer <access_token>`. Errors follow `{"error": "<ERROR_CODE>", "message": "<human text>"}`.
 
-### 2.1 Auth (`/api/v1/auth/`)
+### 2.1 Auth (`/api/v1/auth/`) ✅ implemented
 
-#### `POST /auth/register/`
-Auth: none  
-Body:
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/auth/register/` | none | Register user; returns access + refresh tokens |
+| `POST` | `/auth/login/` | none | Authenticate; returns access + refresh tokens |
+| `POST` | `/auth/logout/` | required | Blacklist refresh token |
+| `GET` | `/auth/me/` | required | Current user profile |
+| `PATCH` | `/auth/me/` | required | Update first\_name, last\_name, phone (role and hospital are admin-only changes) |
+
+#### `POST /auth/register/` — body
 ```json
 {
   "username": "string (required)",
-  "password": "string (required, validated)",
+  "password": "string (required, min 8 chars)",
   "email": "string (optional)",
   "first_name": "string (optional)",
   "last_name": "string (optional)",
@@ -292,98 +373,70 @@ Body:
   "phone": "string (optional)"
 }
 ```
-Response `201`:
-```json
-{
-  "user": { "id": 1, "username": "...", "role": "...", ... },
-  "access": "<jwt>",
-  "refresh": "<jwt>"
-}
-```
+Response `201`: `{"user": {...}, "access": "<jwt>", "refresh": "<jwt>"}`
 Errors: `400 VALIDATION_ERROR`, `409 CONFLICT` (duplicate username/email)
 
----
-
-#### `POST /auth/login/`
-Auth: none  
-Body: `{"username": "string", "password": "string"}`  
-Response `200`: `{"access": "<jwt>", "refresh": "<jwt>"}`  
-Errors: `400 VALIDATION_ERROR` (bad credentials or inactive user)
+#### `POST /auth/login/` — body
+```json
+{"username": "string", "password": "string"}
+```
+Response `200`: `{"access": "<jwt>", "refresh": "<jwt>"}`
 
 ---
 
-#### `POST /auth/logout/`
-Auth: required  
-Body: `{"refresh": "<refresh_token>"}`  
-Response `204`  
-Errors: `400 VALIDATION_ERROR` (missing or invalid token)
-
----
-
-#### `GET /auth/me/`
-Auth: required  
-Response `200`: `UserSerializer` object  
-
-#### `PATCH /auth/me/`
-Auth: required  
-Body (partial): `{"first_name": "...", "last_name": "...", "phone": "..."}`  
-Response `200`: updated `UserSerializer`  
-Note: `role` and `hospital` are not patchable here; those are admin operations.
-
----
-
-### 2.2 Patients (`/api/v1/patients/`) — planned
+### 2.2 Patients (`/api/v1/patients/`) ✅ implemented
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/patients/` | required | List patients (hospital-scoped, paginated). Query params: `search`, `ward`, `status` (active\|discharged) |
+| `GET` | `/patients/` | required | List (hospital-scoped, paginated). Params: `search` (MRN), `ward`, `status` (active\|discharged) |
 | `POST` | `/patients/` | ADMIN+ | Create patient record |
-| `GET` | `/patients/<id>/` | required | Retrieve patient detail |
+| `GET` | `/patients/<id>/` | required | Patient detail |
 | `PATCH` | `/patients/<id>/` | NURSE+ | Update non-PII fields |
 | `DELETE` | `/patients/<id>/` | ADMIN+ | Soft-delete |
-| `POST` | `/patients/<id>/admit/` | WARD\_STAFF+ | Admit patient to a bed |
-| `POST` | `/patients/<id>/discharge/` | WARD\_STAFF+ | Discharge patient |
+| `POST` | `/patients/<id>/admit/` | required | Admit to bed (bed optional) |
+| `POST` | `/patients/<id>/discharge/` | required | Discharge; frees bed |
 | `GET` | `/patients/<id>/admissions/` | required | Admission history |
-| `GET` | `/patients/<id>/events/` | required | Clinical event timeline |
-| `GET` | `/patients/<id>/intelligence/` | DOCTOR\|NURSE | Past AI queries for this patient |
+| `GET` | `/patients/<id>/events/` | required | Clinical event timeline; params: `event_type`, `date_from`, `date_to` |
 | `GET` | `/wards/` | required | List wards for the hospital |
 | `GET` | `/wards/<id>/beds/` | required | List beds and occupancy |
 
 ---
 
-### 2.3 Workflows (`/api/v1/workflows/`) — planned
+### 2.3 Workflows (`/api/v1/workflow-*`) ✅ implemented
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/workflow-templates/` | required | List templates for the hospital |
+| `GET` | `/workflow-templates/` | required | List templates (hospital-scoped). Param: `active` (true\|false) |
 | `POST` | `/workflow-templates/` | ADMIN+ | Create template |
 | `GET` | `/workflow-templates/<id>/` | required | Retrieve template |
 | `PATCH` | `/workflow-templates/<id>/` | ADMIN+ | Update template |
 | `DELETE` | `/workflow-templates/<id>/` | ADMIN+ | Soft-delete |
-| `POST` | `/workflow-instances/` | NURSE+ | Start a workflow for an admission |
-| `GET` | `/workflow-instances/<id>/` | required | View instance and step statuses |
-| `POST` | `/workflow-instances/<id>/steps/<step_index>/complete/` | NURSE+ | Complete a step |
+| `GET` | `/workflow-instances/` | required | List instances. Params: `template`, `admission` |
+| `POST` | `/workflow-instances/` | NURSE+ | Start instance from template for an admission |
+| `GET` | `/workflow-instances/<id>/` | required | Detail with steps nested inline |
+| `POST` | `/workflow-instances/<id>/steps/<n>/complete/` | NURSE+ | Complete a step; auto-advances instance status |
+| `POST` | `/workflow-instances/<id>/cancel/` | NURSE+ | Cancel instance |
 
 ---
 
-### 2.4 Events (`/api/v1/events/`) — planned
+### 2.4 Events (`/api/v1/events/`) ✅ implemented
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/events/` | NURSE+ | Record a clinical event |
-| `GET` | `/events/` | required | List events (filterable by patient, type, date range) |
+| `POST` | `/events/` | NURSE+ | Record clinical event. Guards: discharged admission → 400, wrong patient → 400 |
+| `GET` | `/events/` | required | List events (hospital-scoped). Params: `patient`, `admission`, `event_type`, `date_from`, `date_to` |
 
 ---
 
-### 2.5 Escalations (`/api/v1/escalations/`) — planned
+### 2.5 Escalations (`/api/v1/escalation-*`) — planned
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/escalation-rules/` | ADMIN+ | List rules |
+| `GET` | `/escalation-rules/` | ADMIN+ | List rules for the hospital |
 | `POST` | `/escalation-rules/` | ADMIN+ | Create rule |
 | `PATCH` | `/escalation-rules/<id>/` | ADMIN+ | Update rule |
-| `DELETE` | `/escalation-rules/<id>/` | ADMIN+ | Deactivate rule |
-| `GET` | `/escalation-alerts/` | required | List open alerts (hospital-scoped) |
+| `DELETE` | `/escalation-rules/<id>/` | ADMIN+ | Soft-delete (deactivate) |
+| `GET` | `/escalation-alerts/` | required | List alerts (hospital-scoped). Param: `status` (OPEN\|ACKNOWLEDGED\|RESOLVED) |
 | `POST` | `/escalation-alerts/<id>/acknowledge/` | NURSE+ | Acknowledge alert |
 | `POST` | `/escalation-alerts/<id>/resolve/` | DOCTOR+ | Resolve alert |
 
@@ -393,16 +446,19 @@ Note: `role` and `hospital` are not patchable here; those are admin operations.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/intelligence/query/` | DOCTOR\|NURSE | Submit AI query; returns `202 Accepted` with request id |
-| `GET` | `/intelligence/<id>/` | required | Poll status and result |
+| `POST` | `/intelligence/query/` | NURSE+ | Submit AI query. Returns `202 Accepted` with `{"request_id": <id>}` |
+| `GET` | `/intelligence/<id>/` | required | Poll status and result. Status: PENDING \| COMPLETED \| FAILED |
+| `GET` | `/patients/<id>/intelligence/` | required | Past AI queries for this patient |
+
+**Design note:** The `202 Accepted` pattern is intentional. Making AI calls synchronously would hold a uvicorn worker for 2–15 seconds, blocking other requests. The client either polls `GET /intelligence/<id>/` or waits for a WebSocket push.
 
 ---
 
-### 2.7 Communications
+### 2.7 Communications — planned
 
 | Protocol | Path | Auth | Description |
 |----------|------|------|-------------|
-| WebSocket | `wss://host/ws/notifications/?token=<jwt>` | JWT query param | Real-time push channel |
+| WebSocket | `wss://host/ws/notifications/?token=<jwt>` | JWT query param | Real-time push channel, hospital-scoped |
 | `GET` | `/notifications/` | required | Persistent notification list (paginated) |
 | `POST` | `/notifications/<id>/read/` | required | Mark notification as read |
 
@@ -410,11 +466,20 @@ Note: `role` and `hospital` are not patchable here; those are admin operations.
 
 ## 3. Service Layer Design
 
-Business logic lives in `services.py` within each app. Views call services; services call the ORM. Serializers are input/output contracts only — they do not contain logic.
+Business logic lives exclusively in `services.py` within each app. The data flow is:
 
 ```
-View → serializer.is_valid() → service_function(**validated_data) → ORM
+View → serializer.is_valid() → service_function(**validated_data) → ORM → database
 ```
+
+Views do not contain business logic. Serializers are input/output contracts only — they validate and deserialise, but do not call each other or the ORM directly.
+
+### Why a service layer?
+
+Without it, business logic migrates into views (hard to test without HTTP) or serializers (violates single responsibility). The service layer gives us:
+- Pure functions testable with `TestCase` (no HTTP, no serializer overhead)
+- A single place to enforce invariants
+- A clear write path for each operation — a reviewer can audit what a POST does by reading one function
 
 ### Key service contracts (implemented)
 
@@ -424,32 +489,65 @@ def register_user(*, username, email, password, first_name="",
                   last_name="", role=UserRole.WARD_STAFF,
                   hospital=None, phone="") -> User:
     # Raises ConflictError on duplicate username or email
+
+# apps/patients/services.py
+def create_patient(*, user, hospital, mrn, first_name, last_name,
+                   date_of_birth, gender, **kwargs) -> Patient:
+    # Raises ConflictError if MRN already exists in the hospital
+
+def admit_patient(*, user, patient, bed=None, notes="") -> Admission:
+    # Raises ValidationError if patient already admitted
+    # Raises ConflictError if bed is occupied
+    # Raises ValidationError if bed is from wrong hospital
+
+def discharge_patient(*, user, patient) -> Admission:
+    # Raises ValidationError if no active admission
+
+# apps/workflows/services.py
+def start_workflow(*, user, template, admission, assigned_to=None) -> WorkflowInstance:
+    # Raises ValidationError if template.hospital != admission.patient.hospital
+    # Raises ValidationError if template is inactive
+    # Raises ValidationError if admission is discharged
+    # Creates WorkflowStep rows from template.steps (snapshot)
+
+def complete_step(*, user, instance, step_index, notes="") -> WorkflowStep:
+    # Raises ValidationError if instance is COMPLETED or CANCELLED
+    # Raises ValidationError if step_index not found
+    # Raises ConflictError if step already completed
+    # Auto-advances instance: PENDING→IN_PROGRESS on first step, →COMPLETED when all done
+
+# apps/events/services.py
+def record_event(*, user, patient, admission, event_type, payload, notes="") -> ClinicalEvent:
+    # Raises ValidationError if admission.patient_id != patient.pk
+    # Raises ValidationError if admission is discharged
+    # After save: enqueues evaluate_escalation_rules.delay(admission.pk) [planned]
 ```
 
 ### Key service contracts (planned)
 
 ```python
-# apps/patients/services.py
-def create_patient(*, mrn, first_name, last_name, date_of_birth,
-                   gender, hospital, **kwargs) -> Patient: ...
-def admit_patient(*, patient, bed, admitted_by) -> Admission: ...
-def discharge_patient(*, admission, discharged_by) -> Admission: ...
-
-# apps/events/services.py
-def record_event(*, patient, admission, event_type,
-                 recorded_by, payload, notes="") -> ClinicalEvent:
-    # After save, enqueues evaluate_escalation_rules.delay(admission_id)
-
 # apps/escalations/services.py
 def evaluate_escalation_rules(admission_id: int) -> list[EscalationAlert]:
-    # Called as Celery task; evaluates active rules against latest events
+    # Called as Celery task after every clinical event
+    # Loads all active EscalationRules for the hospital
+    # Evaluates each rule's condition JSON against the latest event payload
+    # Creates EscalationAlert rows for matching rules
+    # Pushes WebSocket notification to hospital group
 
 # apps/intelligence/services.py
-def request_ai_query(*, patient, admission, prompt_type,
-                     requested_by) -> IntelligenceRequest:
-    # Creates request with status=PENDING, enqueues run_ai_query.delay(request_id)
+def request_ai_query(*, user, patient, admission, prompt_type) -> IntelligenceRequest:
+    # Creates IntelligenceRequest (status=PENDING)
+    # Enqueues run_ai_query.delay(request_id)
+    # Returns immediately (caller gets request_id for polling)
+
 def run_ai_query(request_id: int) -> None:
-    # Celery task: builds context, calls Anthropic, stores result, pushes WS notification
+    # Celery task
+    # Fetches IntelligenceRequest and its patient/admission context
+    # Builds prompt from last N ClinicalEvents (structured data only)
+    # Calls anthropic.messages.create() with the prompt
+    # Updates IntelligenceRequest: status=COMPLETED, response_text, tokens_used, latency_ms
+    # Pushes WebSocket push to requesting user
+    # On failure (after retries): status=FAILED
 ```
 
 ---
@@ -461,16 +559,14 @@ config/celery.py        App definition (hospital_copilot)
 apps/*/tasks.py         Tasks auto-discovered per app
 ```
 
-### Planned tasks
+All tasks receive plain database IDs, never ORM objects. This is required because Celery serialises arguments with JSON; ORM objects are not serialisable and would create stale-data bugs if they were.
 
-| Task | Module | Triggered by | Retry |
+| Task | Module | Triggered by | Retry policy |
 |------|--------|-------------|-------|
-| `evaluate_escalation_rules` | `apps.escalations.tasks` | `record_event()` | 3× exp backoff |
-| `run_ai_query` | `apps.intelligence.tasks` | `request_ai_query()` | 2× |
-| `push_notification` | `apps.communications.tasks` | Alert/workflow events | 3× |
-| `send_webhook` | `apps.integrations.tasks` | Configurable triggers | 5× |
-
-All tasks receive plain IDs (not ORM objects) to avoid serialisation issues.
+| `evaluate_escalation_rules` | `apps.escalations.tasks` | `record_event()` | 3× exponential backoff |
+| `run_ai_query` | `apps.intelligence.tasks` | `request_ai_query()` | 2× exponential backoff; sets `status=FAILED` on exhaustion |
+| `push_notification` | `apps.communications.tasks` | Alert / workflow events | 3× exponential backoff |
+| `send_webhook` | `apps.integrations.tasks` | Configurable triggers | 5× exponential backoff |
 
 ---
 
@@ -481,9 +577,9 @@ All tasks receive plain IDs (not ORM objects) to avoid serialisation issues.
 class NotificationConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         token = self.scope["query_string"].decode().split("token=")[-1]
-        user = await authenticate_jwt(token)   # raises if invalid
+        user = await authenticate_jwt(token)
         if user is None:
-            await self.close(code=4001)
+            await self.close(code=4001)   # reject before joining any group
             return
         self.group_name = f"hospital_{user.hospital_id}"
         await self.channel_layer.group_add(self.group_name, self.channel_name)
@@ -493,25 +589,25 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_discard(self.group_name, self.channel_name)
 
     async def notify(self, event):
-        # Receives from group_send(); forwards to the WebSocket client
         await self.send(text_data=json.dumps(event["data"]))
 ```
 
-Sending a push from any service:
+Pushing from a synchronous service:
 ```python
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
-channel_layer = get_channel_layer()
-async_to_sync(channel_layer.group_send)(
+async_to_sync(get_channel_layer().group_send)(
     f"hospital_{hospital_id}",
-    {"type": "notify", "data": {"kind": "ESCALATION", "alert_id": alert.id, ...}},
+    {"type": "notify", "data": {"kind": "ESCALATION", "alert_id": alert.id}},
 )
 ```
 
+Hospital-scoped groups mean a notification always reaches exactly the right staff and never leaks across hospital boundaries.
+
 ---
 
-## 6. Authentication Flow (sequence)
+## 6. Authentication Flow
 
 ```
 Client                        Django                     PostgreSQL
@@ -522,7 +618,7 @@ Client                        Django                     PostgreSQL
   │                              │  authenticate()              │
   │                              ├─────────────────────────────►│
   │                              │◄─────────────────────────────┤
-  │                              │  User found, password OK     │
+  │                              │  User + password OK          │
   │                              │  RefreshToken.for_user(user) │
   │◄─────────────────────────────┤                              │
   │  200 {access, refresh}       │                              │
@@ -531,8 +627,8 @@ Client                        Django                     PostgreSQL
   │  Authorization: Bearer <AT>  │                              │
   ├─────────────────────────────►│                              │
   │                              │  JWTAuthentication:          │
-  │                              │  verify signature, expiry    │
-  │                              │  load user from token sub    │
+  │                              │  verify signature + expiry   │
+  │                              │  load user from token `sub`  │
   │◄─────────────────────────────┤                              │
   │  200 {user object}           │                              │
   │                              │                              │
@@ -550,7 +646,7 @@ Client                        Django                     PostgreSQL
 
 ## 7. Error Response Format
 
-All errors (DRF validation, AppError subclasses, unhandled exceptions) are normalised by `custom_exception_handler`:
+All errors are normalised by `custom_exception_handler` in `apps/core/exceptions.py`:
 
 ```json
 {
@@ -561,13 +657,13 @@ All errors (DRF validation, AppError subclasses, unhandled exceptions) are norma
 
 | Error code | HTTP | When |
 |-----------|------|------|
-| `VALIDATION_ERROR` | 400 | Input fails serializer or business rule |
-| `NOT_FOUND` | 404 | Resource does not exist or is soft-deleted |
+| `VALIDATION_ERROR` | 400 | Input fails serializer validation or a service-layer business rule |
+| `NOT_FOUND` | 404 | Resource does not exist, is soft-deleted, or is out of hospital scope |
 | `PERMISSION_DENIED` | 403 | Authenticated but insufficient role |
-| `CONFLICT` | 409 | Duplicate username, email, MRN, etc. |
-| `INTERNAL_ERROR` | 500 | Unhandled exception (logged with stack trace) |
+| `CONFLICT` | 409 | Duplicate MRN, username, email, bed already occupied, step already completed |
+| `INTERNAL_ERROR` | 500 | Unhandled exception (logged with full stack trace) |
 
-DRF's own validation errors (`serializers.ValidationError`) return `400` with the standard DRF format `{"field": ["error"]}` — these are returned as-is by the exception handler (the `response is not None` branch).
+DRF's own field-level validation errors (`{"field": ["message"]}`) pass through unchanged as `400`.
 
 ---
 
@@ -584,7 +680,7 @@ All list endpoints use `StandardPagination`:
 }
 ```
 
-Defaults: `page_size=25`, max `200`. Override with `?page_size=50`.
+Defaults: `page_size=25`, max `page_size=200`.
 
 ---
 
@@ -592,33 +688,35 @@ Defaults: `page_size=25`, max `200`. Override with `?page_size=50`.
 
 | Endpoint group | WARD\_STAFF | NURSE | DOCTOR | ADMIN | SUPERADMIN |
 |----------------|:-----------:|:-----:|:------:|:-----:|:----------:|
-| Auth (register/login/me) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Auth (register / login / me) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Patient read | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Patient create/update | — | ✓ | ✓ | ✓ | ✓ |
-| Patient delete (soft) | — | — | — | ✓ | ✓ |
-| Admit / Discharge | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Patient create | — | — | — | ✓ | ✓ |
+| Patient update (non-PII) | — | ✓ | ✓ | ✓ | ✓ |
+| Patient soft-delete | — | — | — | ✓ | ✓ |
+| Admit / discharge | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Record clinical event | — | ✓ | ✓ | ✓ | ✓ |
-| Workflow step complete | — | ✓ | ✓ | ✓ | ✓ |
-| Acknowledge alert | — | ✓ | ✓ | ✓ | ✓ |
-| Resolve alert | — | — | ✓ | ✓ | ✓ |
-| AI query | — | ✓ | ✓ | ✓ | ✓ |
-| Manage templates/rules | — | — | — | ✓ | ✓ |
+| Complete workflow step | — | ✓ | ✓ | ✓ | ✓ |
+| Cancel workflow | — | ✓ | ✓ | ✓ | ✓ |
+| Acknowledge escalation alert | — | ✓ | ✓ | ✓ | ✓ |
+| Resolve escalation alert | — | — | ✓ | ✓ | ✓ |
+| Submit AI query | — | ✓ | ✓ | ✓ | ✓ |
+| Manage templates / rules | — | — | — | ✓ | ✓ |
 | Cross-hospital access | — | — | — | — | ✓ |
 
 ---
 
-## 10. Settings & Configuration Summary
+## 10. Settings Reference
 
-| Setting | Value |
-|---------|-------|
-| `AUTH_USER_MODEL` | `users.User` |
-| `JWT ACCESS_TOKEN_LIFETIME` | 8 hours |
-| `JWT REFRESH_TOKEN_LIFETIME` | 7 days |
-| `JWT ROTATE_REFRESH_TOKENS` | True |
-| `JWT BLACKLIST_AFTER_ROTATION` | True |
-| `REST_FRAMEWORK.DEFAULT_AUTHENTICATION_CLASSES` | `JWTAuthentication` |
-| `REST_FRAMEWORK.DEFAULT_PERMISSION_CLASSES` | `IsAuthenticated` |
-| `CELERY_TIMEZONE` | `Asia/Kolkata` |
-| `TIME_ZONE` | `Asia/Kolkata` |
-| `DEFAULT_AUTO_FIELD` | `BigAutoField` |
-| `CHANNEL_LAYERS backend` | `channels_redis.core.RedisChannelLayer` |
+| Setting | Value | Why |
+|---------|-------|-----|
+| `AUTH_USER_MODEL` | `users.User` | Custom user with role and hospital FK |
+| `JWT ACCESS_TOKEN_LIFETIME` | 8 hours | Covers a standard nursing shift without requiring mid-shift re-login |
+| `JWT REFRESH_TOKEN_LIFETIME` | 7 days | Weekly re-authentication |
+| `JWT ROTATE_REFRESH_TOKENS` | True | Each use issues a new refresh token |
+| `JWT BLACKLIST_AFTER_ROTATION` | True | Old refresh token cannot be replayed |
+| `DEFAULT_AUTHENTICATION_CLASSES` | `JWTAuthentication` | Stateless auth; no server-side sessions |
+| `DEFAULT_PERMISSION_CLASSES` | `IsAuthenticated` | All endpoints require auth unless explicitly overridden |
+| `CELERY_TIMEZONE` | `Asia/Kolkata` | Task schedules match clinical shift times |
+| `TIME_ZONE` | `Asia/Kolkata` | All timestamps stored as UTC, displayed in IST |
+| `DEFAULT_AUTO_FIELD` | `BigAutoField` | Future-proof PK size (> 2 billion rows) |
+| `CHANNEL_LAYERS backend` | `channels_redis.core.RedisChannelLayer` | Redis DB 0 for WebSocket group messaging |
