@@ -28,6 +28,7 @@ THIRD_PARTY_APPS = [
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
     "channels",
+    "encrypted_model_fields",
 ]
 
 LOCAL_APPS = [
@@ -142,6 +143,9 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
+
+# Fernet key for django-encrypted-model-fields (base64url-encoded 32 bytes)
+FIELD_ENCRYPTION_KEY = env("FIELD_ENCRYPTION_KEY", default="")
 
 LOGGING = {
     "version": 1,

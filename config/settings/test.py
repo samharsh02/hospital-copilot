@@ -12,3 +12,6 @@ DATABASES = {
 # Skip Redis for tests — channels and cache won't be exercised at unit test level
 CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
 CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+# Fixed Fernet key for tests — do NOT use in production
+FIELD_ENCRYPTION_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
