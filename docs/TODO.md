@@ -46,21 +46,23 @@ This file is the single source of truth for what's done, what's next, and what's
 Work through the apps in dependency order. Each app should follow the same pattern:
 `constants → models → migrations → services → serializers → views → urls → tests`.
 
-### 1. `apps/patients` — Core domain ← **start here**
+### 1. `apps/patients` — Core domain ✅ DONE
 
-The patient record is the central entity everything else references.
-
-- [ ] `Patient` model — MRN, first/last name (encrypted PII), date of birth, gender, blood group, contact phone (encrypted), emergency contact, hospital FK, admitted_at, discharged_at, is_active
-- [ ] `Ward` model — name, hospital FK, capacity
-- [ ] `Bed` model — number, ward FK, is_occupied
-- [ ] `Admission` model — patient FK, bed FK, admitted_by (User FK), admitted_at, discharged_at, notes
-- [ ] Patient search endpoint (`GET /api/v1/patients/?search=&ward=&status=`)
-- [ ] Patient CRUD (`GET/POST /api/v1/patients/`, `GET/PATCH /api/v1/patients/<id>/`)
-- [ ] Admission endpoints (`POST /api/v1/patients/<id>/admit/`, `POST /api/v1/patients/<id>/discharge/`)
-- [ ] Ward + Bed list endpoints
-- [ ] Role-based permission: WARD_STAFF and above can read; NURSE/DOCTOR can admit; ADMIN can create/delete
-- [ ] Migrations
-- [ ] Tests — service + view layer
+- [x] `Patient` model — MRN, encrypted first/last name, dob, gender, blood group, encrypted contact phone, emergency contact, hospital FK, soft-delete + audit
+- [x] `Ward` model — name, hospital FK, capacity, soft-delete + audit
+- [x] `Bed` model — number, ward FK, is_occupied, audit; unique_together (ward, number)
+- [x] `Admission` model — patient + bed FK, admitted_by, admitted/discharged timestamps, notes
+- [x] `GET /api/v1/patients/?search=&ward=&status=` — search by MRN, filter by ward, filter active/discharged
+- [x] `GET/POST /api/v1/patients/` — list (all auth) + create (ADMIN+)
+- [x] `GET/PATCH/DELETE /api/v1/patients/<id>/` — detail, patch (NURSE+), soft-delete (ADMIN+)
+- [x] `POST /api/v1/patients/<id>/admit/` — admit to bed (or no bed); guards: already admitted 400, occupied bed 409
+- [x] `POST /api/v1/patients/<id>/discharge/` — discharge; frees bed; guard: not admitted 400
+- [x] `GET /api/v1/patients/<id>/admissions/` — admission history
+- [x] `GET /api/v1/wards/`, `GET /api/v1/wards/<id>/beds/`
+- [x] `permissions.py` — `IsNurseOrAbove`, `IsAdminOrAbove` role-rank permission classes
+- [x] `FIELD_ENCRYPTION_KEY` wired into settings; `encrypted_model_fields` in INSTALLED_APPS
+- [x] Migration `0001_initial`
+- [x] Tests — 47 passing (service + view layer)
 
 ### 2. `apps/workflows` — Clinical workflows
 
