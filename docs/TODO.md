@@ -64,15 +64,21 @@ Work through the apps in dependency order. Each app should follow the same patte
 - [x] Migration `0001_initial`
 - [x] Tests — 47 passing (service + view layer)
 
-### 2. `apps/workflows` — Clinical workflows
+### 2. `apps/workflows` — Clinical workflows ✅ DONE
 
 Structured checklists that run during a patient's stay (admission checklist, vitals round, discharge process, etc.).
 
-- [ ] `WorkflowTemplate` model — name, hospital FK, steps (JSONField), trigger (on_admit / on_discharge / manual)
-- [ ] `WorkflowInstance` model — template FK, patient admission FK, status (pending/in_progress/completed), assigned_to (User FK), started_at, completed_at
-- [ ] `WorkflowStep` model — instance FK, step_index, title, is_completed, completed_by, completed_at, notes
-- [ ] Endpoints: create/list templates, start instance from template, complete a step, view instance status
-- [ ] Tests
+- [x] `WorkflowTemplate` model — name, hospital FK, steps (JSONField array of {index, title, description}), trigger (ON_ADMIT / ON_DISCHARGE / MANUAL), is_active, soft-delete + audit
+- [x] `WorkflowInstance` model — template FK, admission FK, status (PENDING→IN_PROGRESS→COMPLETED/CANCELLED), assigned_to (User FK nullable), started_at, completed_at
+- [x] `WorkflowStep` model — instance FK, step_index, title, is_completed, completed_by, completed_at, notes
+- [x] `GET/POST /api/v1/workflow-templates/` — list (all auth, hospital-scoped) + create (ADMIN+)
+- [x] `GET/PATCH/DELETE /api/v1/workflow-templates/<id>/` — detail, patch (ADMIN+), soft-delete (ADMIN+)
+- [x] `GET/POST /api/v1/workflow-instances/` — list (all auth, hospital-scoped) + start (NURSE+)
+- [x] `GET /api/v1/workflow-instances/<id>/` — detail with steps inline
+- [x] `POST /api/v1/workflow-instances/<id>/steps/<step_index>/complete/` — complete step (NURSE+); auto-advances instance status
+- [x] `POST /api/v1/workflow-instances/<id>/cancel/` — cancel (NURSE+)
+- [x] Migration `0001_initial`
+- [x] Tests — 54 passing (27 service + 27 view)
 
 ### 3. `apps/events` — Clinical events log
 
