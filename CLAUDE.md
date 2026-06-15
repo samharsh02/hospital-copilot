@@ -54,13 +54,19 @@ That leaves ~2 GB headroom before touching swap — comfortable. Disk at 20 GB i
 | `haproxy` | Was already failed at boot (config pointed to `1.1.1.1:80` — a placeholder). Not part of our stack. |
 | `haproxy_exporter` | Prometheus exporter for haproxy; pointless without haproxy. |
 
-### To be installed
+### Installed
 
 ```
-nginx          # reverse proxy / TLS
-postgresql15   # primary database
-redis          # broker + cache + channels
-python3.11     # runtime (or use pyenv)
+python3.11     # compiled from source at /usr/local/bin/python3.11
+postgresql15   # running, DB: hospital_copilot
+redis          # running on 127.0.0.1:6379
+gunicorn       # process manager for uvicorn workers
+```
+
+### Still to install
+
+```
+nginx          # reverse proxy / TLS — not yet configured
 ```
 
 ## Stack Layout
@@ -131,10 +137,11 @@ hospital-copilot/
 │   └── communications/# WebSocket / notifications — TODO
 ├── config/
 │   ├── settings/      # base / development / test / production
+│   ├── celery.py      # Celery app (invoke as: celery -A config worker)
 │   ├── urls.py
 │   ├── asgi.py
 │   └── wsgi.py
-└── celery.py
+└── TODO.md            # implementation plan — keep updated
 ```
 
 ## Deployment
@@ -175,6 +182,14 @@ ssh root@172.16.232.103
 cd /opt/hospital-copilot
 DJANGO_SETTINGS_MODULE=config.settings.production .venv/bin/python manage.py changepassword admin
 ```
+
+## Implementation Rule
+
+**After every implementation session, `TODO.md` must be updated:**
+- Mark completed items with `[x]`
+- Remove or correct anything that is no longer accurate
+- Add newly discovered tasks or blockers
+- The file lives at the repo root: `TODO.md`
 
 ## Running Tests (local)
 
