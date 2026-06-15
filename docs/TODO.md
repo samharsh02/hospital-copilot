@@ -80,14 +80,17 @@ Structured checklists that run during a patient's stay (admission checklist, vit
 - [x] Migration `0001_initial`
 - [x] Tests — 54 passing (27 service + 27 view)
 
-### 3. `apps/events` — Clinical events log
+### 3. `apps/events` — Clinical events log ✅ DONE
 
 Append-only log of significant events during a patient stay (vitals recorded, medication given, nurse note, doctor visit, etc.).
 
-- [ ] `ClinicalEvent` model — patient FK, admission FK, event_type (choices), recorded_by (User FK), recorded_at, payload (JSONField), notes
-- [ ] `EventType` constants — VITALS, MEDICATION, NURSE_NOTE, DOCTOR_NOTE, LAB_RESULT, ALERT, OTHER
-- [ ] Endpoints: `POST /api/v1/events/` (record), `GET /api/v1/patients/<id>/events/` (timeline)
-- [ ] Tests
+- [x] `ClinicalEvent` model — patient FK, admission FK, event_type, recorded_by (nullable SET NULL), recorded_at (indexed), payload (JSONField), notes + BaseMixin
+- [x] `EventType` constants — VITALS, MEDICATION, NURSE_NOTE, DOCTOR_NOTE, LAB_RESULT, ALERT, OTHER
+- [x] `POST /api/v1/events/` — record event (NURSE+); guards: wrong patient-admission combo, discharged admission
+- [x] `GET /api/v1/events/` — list (auth, hospital-scoped, filterable by patient/admission/event_type/date_from/date_to)
+- [x] `GET /api/v1/patients/<id>/events/` — patient event timeline (filterable by event_type/date range)
+- [x] Migration `0001_initial`
+- [x] Tests — 28 passing (10 service + 18 view)
 
 ### 4. `apps/escalations` — Escalation rules and alerts
 
