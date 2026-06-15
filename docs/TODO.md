@@ -92,15 +92,24 @@ Append-only log of significant events during a patient stay (vitals recorded, me
 - [x] Migration `0001_initial`
 - [x] Tests — 28 passing (10 service + 18 view)
 
-### 4. `apps/escalations` — Escalation rules and alerts
+### 4. `apps/escalations` — Escalation rules and alerts ✅ DONE
 
 Rules that fire when a patient condition or workflow threshold is breached.
 
-- [ ] `EscalationRule` model — hospital FK, name, condition (JSONField), priority (LOW/MEDIUM/HIGH/CRITICAL), notify_roles
-- [ ] `EscalationAlert` model — rule FK, patient FK, admission FK, triggered_at, acknowledged_at, acknowledged_by, resolved_at, status
-- [ ] Rule evaluation service (called after each new ClinicalEvent)
-- [ ] Endpoints: CRUD rules, list/acknowledge/resolve alerts
-- [ ] Tests
+- [x] `EscalationRule` model — hospital FK, name, condition (JSONField DSL), priority (LOW/MEDIUM/HIGH/CRITICAL), notify_roles (JSONField list), is_active, soft-delete + audit
+- [x] `EscalationAlert` model — rule FK, patient FK, admission FK, triggered_at, acknowledged_at, acknowledged_by, resolved_at, status (OPEN/ACKNOWLEDGED/RESOLVED)
+- [x] Condition DSL evaluator — `_resolve_field` (payload.*, event_type, notes), `_evaluate_condition` (eq/ne/lt/lte/gt/gte/in), `_validate_condition`
+- [x] `evaluate_escalation_rules(admission_id)` — evaluates active rules against latest event, deduplicates OPEN alerts, pushes WS notification (best-effort)
+- [x] `evaluate_escalation_rules_task` — Celery task with 3 retries, exponential backoff
+- [x] Lazy import in `record_event` (events app) dispatches task in try/except — never blocks event recording
+- [x] `GET/POST /api/v1/escalation-rules/` — list (ADMIN+, hospital-scoped, ?active=) + create (ADMIN+)
+- [x] `GET/PATCH/DELETE /api/v1/escalation-rules/<id>/` — detail, patch (ADMIN+), soft-delete (ADMIN+)
+- [x] `GET /api/v1/escalation-alerts/` — list (all auth, hospital-scoped, ?status=/?patient=/?admission=)
+- [x] `POST /api/v1/escalation-alerts/<id>/acknowledge/` — (NURSE+); guards: non-OPEN → 400
+- [x] `POST /api/v1/escalation-alerts/<id>/resolve/` — (DOCTOR+); guards: already resolved → 409
+- [x] WS push `_push_alert_notification` — channels group_send to `hospital_<id>` (best-effort, try/except)
+- [x] Migration `0001_initial`
+- [x] Tests — 65 passing (37 service + 28 view, including end-to-end event→task→alert pipeline)
 
 ### 5. `apps/intelligence` — Claude-powered suggestions
 

@@ -29,9 +29,13 @@ def record_event(
         updated_by=user,
     )
 
-    # Once escalations app is implemented, trigger rule evaluation here:
-    # from apps.escalations.tasks import evaluate_escalation_rules
-    # evaluate_escalation_rules.delay(admission.pk)
+    # Evaluate escalation rules against the new event (runs synchronously in tests,
+    # dispatched to Celery worker in production).
+    try:
+        from apps.escalations.tasks import evaluate_escalation_rules_task
+        evaluate_escalation_rules_task.delay(admission.pk)
+    except Exception:
+        pass  # Never fail event recording because of task dispatch
 
     return event
 

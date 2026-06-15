@@ -15,3 +15,8 @@ CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"
 
 # Fixed Fernet key for tests — do NOT use in production
 FIELD_ENCRYPTION_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+# Run Celery tasks synchronously in tests so task side-effects (e.g. escalation
+# rule evaluation) execute inline without a running broker.
+CELERY_TASK_ALWAYS_EAGER = True
+CELERY_TASK_EAGER_PROPAGATES = True
