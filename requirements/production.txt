@@ -1,0 +1,8 @@
+-r base.txt
+
+# ASGI server
+uvicorn[standard]==0.32.1
+gunicorn==23.0.0
+
+# Error tracking
+sentry-sdk[django]==2.18.0

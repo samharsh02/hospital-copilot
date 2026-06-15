@@ -1,0 +1,17 @@
+-r base.txt
+
+# Testing
+pytest==8.3.3
+pytest-django==4.9.0
+pytest-cov==6.0.0
+factory-boy==3.3.1
+
+# Linting and type checking
+ruff==0.8.0
+mypy==1.13.0
+django-stubs==5.1.1
+djangorestframework-stubs==3.15.1
+
+# Dev utilities
+ipython==8.29.0
+django-extensions==3.2.3

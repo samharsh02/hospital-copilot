@@ -1,0 +1,27 @@
+# Web framework
+Django==5.1.7
+djangorestframework==3.15.2
+djangorestframework-simplejwt==5.3.1
+
+# Real-time (WebSocket)
+channels==4.1.0
+channels-redis==4.2.0
+
+# Task queue
+celery==5.4.0
+redis==5.0.8
+
+# Database
+psycopg2-binary==2.9.9
+
+# Environment / config
+django-environ==0.11.2
+
+# AI
+anthropic==0.34.0
+
+# Encryption (PII fields)
+django-encrypted-model-fields==0.6.5
+
+# Utilities
+python-dateutil==2.9.0
