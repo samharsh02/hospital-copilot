@@ -137,20 +137,54 @@ hospital-copilot/
 └── celery.py
 ```
 
-## Migrations
+## Deployment
 
-No migrations exist yet. Before first deployment:
+The server is **fully set up** as of 2026-06-15. To deploy a new version:
 
 ```bash
-python manage.py makemigrations
-python manage.py migrate
-python manage.py createsuperuser
+# On the server
+cd /opt/hospital-copilot
+git pull
+DJANGO_SETTINGS_MODULE=config.settings.production .venv/bin/python manage.py migrate
+systemctl restart hospital-copilot hospital-copilot-celery
 ```
 
-## Running Tests
+### Systemd services
+
+| Service | Command |
+|---------|---------|
+| `hospital-copilot` | gunicorn + uvicorn workers, port 8000 |
+| `hospital-copilot-celery` | celery -A config worker, 2 threads |
+| `postgresql-15` | managed by PGDG init |
+| `redis` | managed by Remi init |
+
+All four services auto-start on boot. Logs: `/var/log/hospital-copilot/`.
+
+### Python build notes
+
+Python 3.11.9 was compiled from source (CentOS 7 has no pre-built 3.11).
+- OpenSSL 1.1.1k via `openssl11-devel` from EPEL, symlinked to `/usr/local/ssl11/`
+- Installed to `/usr/local/bin/python3.11`
+- Source left in `/tmp/Python-3.11.9` (can be removed to reclaim ~200 MB)
+
+### Superuser
+
+Username `admin`, password `changeme123!` — **change this immediately** via:
+```bash
+ssh root@172.16.232.103
+cd /opt/hospital-copilot
+DJANGO_SETTINGS_MODULE=config.settings.production .venv/bin/python manage.py changepassword admin
+```
+
+## Running Tests (local)
 
 ```bash
 .venv/bin/python -m pytest apps/ -v
 ```
 
 Tests use in-memory SQLite and `--no-migrations` (syncdb). All 85 tests pass as of 2026-06-15.
+
+## Celery
+
+App is defined in `config/celery.py`, exposed via `config/__init__.py`.
+Invoke as `celery -A config worker` — **not** `-A celery` (that circular-imports the root module).
