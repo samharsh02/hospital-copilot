@@ -141,7 +141,9 @@ hospital-copilot/
 │   ├── urls.py
 │   ├── asgi.py
 │   └── wsgi.py
-└── TODO.md            # implementation plan — keep updated
+├── docs/
+│   └── TODO.md        # implementation plan — keep updated
+└── CLAUDE.md          # Claude Code config — must stay at root
 ```
 
 ## Deployment
@@ -183,13 +185,22 @@ cd /opt/hospital-copilot
 DJANGO_SETTINGS_MODULE=config.settings.production .venv/bin/python manage.py changepassword admin
 ```
 
+## Docs
+
+All project documentation lives in `docs/`. Key files:
+
+| File | Purpose |
+|------|---------|
+| `docs/TODO.md` | Implementation plan — what's done, what's next, what's blocked |
+
+> `CLAUDE.md` (this file) stays at the project root — Claude Code only auto-loads it from there. All other docs go in `docs/`.
+
 ## Implementation Rule
 
-**After every implementation session, `TODO.md` must be updated:**
+**After every implementation session, `docs/TODO.md` must be updated:**
 - Mark completed items with `[x]`
 - Remove or correct anything that is no longer accurate
 - Add newly discovered tasks or blockers
-- The file lives at the repo root: `TODO.md`
 
 ## Running Tests (local)
 
