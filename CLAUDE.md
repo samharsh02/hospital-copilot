@@ -57,74 +57,86 @@ That leaves ~2 GB headroom before touching swap — comfortable. Disk at 20 GB i
 ### Installed
 
 ```
-python3.11     # compiled from source at /usr/local/bin/python3.11
-postgresql15   # running, DB: hospital_copilot
-redis          # running on 127.0.0.1:6379
-gunicorn       # process manager for uvicorn workers
+docker-ce 26.1.4          # container runtime
+docker-compose-plugin     # v2.27.1 — invoked as 'docker compose'
+python3.11                # compiled from source (no longer used — superseded by Docker image)
+postgresql15              # host install (superseded by Docker volume)
+redis                     # host install (superseded by Docker container)
 ```
 
-### Still to install
-
-```
-nginx          # reverse proxy / TLS — not yet configured
-```
-
-## Stack Layout
+## Stack Layout (Docker)
 
 ```
 Internet
    │
-  Nginx :443 (TLS) / :80 (redirect)
-   │
-  uvicorn :8000  ← Django ASGI (HTTP + WebSocket)
-   │
-  ┌─────────────┬──────────────┐
-  │             │              │
-PostgreSQL    Redis         Celery workers
-  :5432        :6379
+  nginx container :80 (→ 443 after TLS)
+   ├── /api/*  /ws/*  /admin/*  /static/* → api container :8000
+   └── /*                                 → frontend container :80
+         │
+  ┌──────┴───────────┬──────────────────────┐
+  │                  │                      │
+api container     celery container       frontend container
+(django/uvicorn)  (celery -A config)     (nginx → React SPA)
+  │                  │
+  └──────┬───────────┘
+         │
+  ┌──────┴──────────────────┐
+  │                         │
+db container              redis container
+postgres:15               redis:7
+(volume: postgres_data)   (volume: redis_data)
 ```
 
 ## Port Plan
 
 | Port | Service |
 |------|---------|
-| 22 | SSH |
-| 80 | Nginx (redirect to 443) |
-| 443 | Nginx (TLS, proxies to uvicorn) |
-| 8000 | uvicorn (internal only, not exposed) |
-| 5432 | PostgreSQL (localhost only) |
-| 6379 | Redis (localhost only) |
+| 22 | SSH (host) |
+| 80 | nginx container (external) |
+| 443 | nginx container (TLS — not yet configured) |
+| 8000 | api container (internal Docker network only) |
+| 5432 | db container (internal Docker network only) |
+| 6379 | redis container (internal Docker network only) |
 
-## Environment Variables Required
+## Environment Variables (docker-compose)
+
+The `.env` file in `/opt/hospital-copilot/` is read by both Docker Compose (for `${VAR}` substitution in the YAML) and injected into containers via `env_file: .env`. `DATABASE_URL` and `REDIS_URL` are set by the `environment:` block in `docker-compose.yml` and override anything in `.env`.
 
 ```
 SECRET_KEY=
-DATABASE_URL=postgres://hospital:PASSWORD@localhost:5432/hospital_copilot
-REDIS_URL=redis://localhost:6379/0
+DB_PASSWORD=               # used by compose to build DATABASE_URL (host = 'db')
 ANTHROPIC_API_KEY=
 DEBUG=False
-ALLOWED_HOSTS=172.16.232.103
+ALLOWED_HOSTS=172.16.232.103,localhost
 LOG_LEVEL=INFO
+SECURE_SSL_REDIRECT=False
+SESSION_COOKIE_SECURE=False
+CSRF_COOKIE_SECURE=False
 ```
 
 ## Tech Stack Summary
 
 | Layer | Technology |
 |-------|-----------|
+| Container runtime | Docker + docker-compose v2 |
 | Framework | Django 5.1 + DRF |
 | ASGI server | uvicorn (via `gunicorn -k uvicorn.workers.UvicornWorker`) |
 | Auth | JWT (simplejwt) with token blacklist |
 | WebSocket | Django Channels 4 over Redis |
 | Task queue | Celery 5 + Redis |
 | AI | Anthropic API (Claude) — external call only |
-| Database | PostgreSQL 15 |
-| Cache | Redis |
-| Reverse proxy | Nginx |
+| Database | PostgreSQL 15 (Docker volume) |
+| Cache | Redis 7 (Docker container) |
+| Reverse proxy | Nginx (Docker container, routes API + WS + static) |
+| Frontend | React 18 + Vite 6 + TypeScript (separate repo) |
 
 ## Repository Layout
 
+Backend: `https://github.com/samharsh02/hospital-copilot.git`
+Frontend: `https://github.com/samharsh02/hospital-copilot-ui.git`
+
 ```
-hospital-copilot/
+hospital-copilot/              ← backend repo (this one)
 ├── apps/
 │   ├── core/          # BaseMixin, SoftDeleteMixin, Hospital, exceptions, helpers — DONE
 │   ├── users/         # User model, JWT auth endpoints (register/login/logout/me) — DONE
@@ -141,48 +153,78 @@ hospital-copilot/
 │   ├── urls.py
 │   ├── asgi.py
 │   └── wsgi.py
+├── nginx/
+│   └── nginx.conf     # nginx routing config for Docker container
 ├── docs/
-│   └── TODO.md        # implementation plan — keep updated
+│   ├── TODO.md        # implementation plan — keep updated
+│   ├── HLD.md         # High Level Design
+│   └── LLD.md         # Low Level Design
+├── Dockerfile         # backend image (python:3.11-slim)
+├── docker-compose.yml # full stack: db, redis, api, celery, frontend, nginx
+├── entrypoint.sh      # migrate + start server
+├── .env.docker.example# template for docker-compose .env
 └── CLAUDE.md          # Claude Code config — must stay at root
+
+frontend/                      ← separate git repo (gitignored here)
+├── src/
+│   ├── api/           # fetch client + auth API calls
+│   ├── store/         # auth store (localStorage JWT)
+│   ├── hooks/         # useAuth
+│   ├── pages/         # LoginPage, DashboardPage
+│   └── types/         # TypeScript interfaces
+├── Dockerfile         # multi-stage: node:20 build → nginx:alpine serve
+├── nginx.conf         # SPA routing (try_files → index.html)
+└── .env.example       # VITE_API_BASE_URL
 ```
 
 ## Deployment
 
-The server is **fully set up** as of 2026-06-15. To deploy a new version:
+Stack runs via Docker Compose. On the server, repos are at:
+- Backend: `/opt/hospital-copilot/`
+- Frontend: `/opt/hospital-copilot/frontend/` (cloned inside backend dir)
 
+### First-time setup
 ```bash
-# On the server
+ssh root@172.16.232.103
 cd /opt/hospital-copilot
-git pull
-DJANGO_SETTINGS_MODULE=config.settings.production .venv/bin/python manage.py migrate
-systemctl restart hospital-copilot hospital-copilot-celery
+cp .env.docker.example .env   # then fill in SECRET_KEY, DB_PASSWORD
+docker compose up -d --build
+docker compose exec api python manage.py createsuperuser
 ```
 
-### Systemd services
+### Deploy a new backend version
+```bash
+cd /opt/hospital-copilot
+git pull
+docker compose build api celery
+docker compose up -d --no-deps api celery
+```
 
-| Service | Command |
-|---------|---------|
-| `hospital-copilot` | gunicorn + uvicorn workers, port 8000 |
-| `hospital-copilot-celery` | celery -A config worker, 2 threads |
-| `postgresql-15` | managed by PGDG init |
-| `redis` | managed by Remi init |
+### Deploy a new frontend version
+```bash
+cd /opt/hospital-copilot/frontend
+git pull
+cd ..
+docker compose build frontend
+docker compose up -d --no-deps frontend
+```
 
-All four services auto-start on boot. Logs: `/var/log/hospital-copilot/`.
-
-### Python build notes
-
-Python 3.11.9 was compiled from source (CentOS 7 has no pre-built 3.11).
-- OpenSSL 1.1.1k via `openssl11-devel` from EPEL, symlinked to `/usr/local/ssl11/`
-- Installed to `/usr/local/bin/python3.11`
-- Source left in `/tmp/Python-3.11.9` (can be removed to reclaim ~200 MB)
+### Useful commands
+```bash
+docker compose ps                            # service status
+docker compose logs -f api                   # tail API logs
+docker compose exec api python manage.py migrate          # run migrations manually
+docker compose exec api python manage.py createsuperuser  # create admin user
+docker compose exec db psql -U hospital hospital_copilot  # DB shell
+docker compose down                          # stop all containers
+docker compose down -v                       # stop + delete volumes (destroys DB!)
+```
 
 ### Superuser
 
 Username `admin`, password `changeme123!` — **change this immediately** via:
 ```bash
-ssh root@172.16.232.103
-cd /opt/hospital-copilot
-DJANGO_SETTINGS_MODULE=config.settings.production .venv/bin/python manage.py changepassword admin
+docker compose exec api python manage.py changepassword admin
 ```
 
 ## Docs

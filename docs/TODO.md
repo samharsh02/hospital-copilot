@@ -9,14 +9,17 @@ This file is the single source of truth for what's done, what's next, and what's
 
 ### Infrastructure
 - [x] Server provisioned: `172.16.232.103` (CentOS 7, 2 vCPU, 3.6 GB RAM + 2 GB swap, 20 GB disk)
-- [x] Python 3.11.9 compiled from source (with OpenSSL 1.1.1k)
-- [x] PostgreSQL 15 installed and running (`hospital_copilot` DB, `hospital` user)
-- [x] Redis 7.2 installed and running (localhost only)
-- [x] App deployed to `/opt/hospital-copilot/` from GitHub
-- [x] `hospital-copilot` systemd service (gunicorn + 2 uvicorn workers, port 8000)
-- [x] `hospital-copilot-celery` systemd service (celery -A config, 2 workers)
-- [x] All migrations applied; API responding at `http://172.16.232.103:8000/health/`
-- [ ] **Nginx** reverse proxy + TLS (port 80→443, proxy to :8000) — not yet installed
+- [x] Docker CE 26.1.4 + Docker Compose v2.27.1 installed on server
+- [x] Backend `Dockerfile` (python:3.11-slim; entrypoint runs migrate then starts gunicorn)
+- [x] `docker-compose.yml` — services: db (postgres:15), redis:7, api, celery, frontend, nginx
+- [x] `nginx/nginx.conf` — routes `/api/` + `/ws/` to api:8000, `/` to frontend container
+- [x] Frontend scaffolded at `frontend/` — React 18 + Vite 6 + TypeScript; auth layer wired
+- [x] Frontend `Dockerfile` — multi-stage: Node 20 build → nginx:alpine serve
+- [x] Frontend repo at https://github.com/samharsh02/hospital-copilot-ui.git (main branch)
+- [x] Python 3.11.9 compiled from source (with OpenSSL 1.1.1k) — superseded by Docker
+- [x] PostgreSQL 15 installed and running on host — superseded by Docker volume
+- [x] Redis 7.2 installed and running on host — superseded by Docker container
+- [x] Old systemd services (`hospital-copilot`, `hospital-copilot-celery`) stopped and disabled
 
 ### `apps/core` — Base layer
 - [x] `BaseMixin` — `created_at`, `updated_at`, `created_by`, `updated_by`
@@ -122,18 +125,18 @@ Connect to hospital HIS/EMR systems, lab systems, etc.
 
 ## Infrastructure Remaining
 
-- [ ] **Nginx** — install, configure as reverse proxy on :80/:443, proxy to :8000, serve WebSocket upgrade
-- [ ] **TLS certificate** — Let's Encrypt (certbot) or provide a cert; needed before any external traffic
-- [ ] **Firewall** — `firewalld` rules: open 80, 443; keep 8000 internal only
+- [ ] **TLS certificate** — Let's Encrypt (certbot) or provide a cert; needed before external traffic. Add HTTPS listener to nginx/nginx.conf and update ALLOWED_HOSTS.
+- [ ] **Firewall** — `firewalld` rules: open 80 (and 443 after TLS); keep 8000 internal only (nginx handles external traffic now)
 - [ ] **Change admin password** — default is `changeme123!`, must be changed before external exposure
 - [ ] **Set `ANTHROPIC_API_KEY`** in `/opt/hospital-copilot/.env` on the server
-- [ ] **`.env.example`** — review and keep in sync with actual required vars
+- [ ] **Migrate existing PostgreSQL data** — current data is in the host PostgreSQL; after `docker compose up`, run migrations into the new Docker Postgres volume (`docker compose exec api python manage.py migrate`)
 
 ---
 
 ## Known Issues / Tech Debt
 
-- `ALLOWED_HOSTS` on the server includes `127.0.0.1` as a workaround for health checks; once Nginx is in front, restrict to `172.16.232.103` and `localhost` only
-- Git committer name/email is auto-configured from hostname — run `git config --global user.name` / `user.email` locally to fix
-- Python 3.11 source still in `/tmp/Python-3.11.9` (~200 MB); safe to delete once the build is confirmed stable
+- Git committer name/email is auto-configured from hostname — run `git config --global user.name` / `user.email` locally and on server to fix
+- Python 3.11 source still in `/tmp/Python-3.11.9` on server (~200 MB); safe to delete (build now uses Docker)
 - Test suite uses `--no-migrations` (syncdb); migration smoke tests against a real DB are not covered
+- `DJANGO_SETTINGS_MODULE` is hardcoded to `production` in the Dockerfile `ENV`; override via compose env if dev image is needed
+- Frontend has no router yet (`react-router-dom` not installed); only Login and Dashboard pages exist as a scaffold
