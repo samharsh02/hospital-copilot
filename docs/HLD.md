@@ -4,14 +4,17 @@
 
 ### 1.1 Problems We Are Solving
 
-Clinical staff in hospital wards operate across multiple disconnected tools — paper checklists, verbal handoffs, and separate HIS/EMR systems that do not talk to each other. This creates four concrete failure modes:
+Indian hospitals — particularly private tier-2 and tier-3 facilities — have a fundamental operational visibility problem. Management (medical superintendent, COO, matron) makes decisions about beds, staff, and patient flow using fragmented information: verbal reports, paper registers, and isolated HIS modules that don't communicate. This produces three concrete, daily failure modes:
 
-1. **Missed escalations.** A nurse records a dangerously low SpO₂ reading in one place; a doctor on a different system never sees it. Escalation depends on verbal communication, which fails at handoff time.
-2. **Checklist drift.** Admission, discharge, and round-based checklists exist on paper or in generic tools. Steps get skipped, signed off without being done, or differ between shifts.
-3. **Cognitive overload.** A senior doctor managing 15–20 patients in a ward cannot hold a coherent picture of each patient's last 24 hours of events. They need a synthesised view, not a raw log.
-4. **No audit trail.** When a near-miss or adverse event occurs, reconstructing the timeline of what was done, when, and by whom is extremely difficult. Accountability gaps drive poor institutional learning.
+1. **Operational blindness.** Hospital management cannot answer basic questions in real time: How many beds are occupied right now? Which patients are past their expected discharge date? Which ward is at capacity? These answers require walking the floor or calling ward clerks.
+2. **Discharge bottlenecks.** Patients ready to be discharged remain in beds for hours because no one has a centralised view of who is ready, who is blocking a bed, and who needs to act next. This directly reduces effective capacity.
+3. **No aggregate data for decision-making.** Average length of stay by ward, admission patterns by time of day, bed utilisation by week — none of this is available without manual data extraction. Management decisions are made on instinct, not evidence.
 
-Hospital Copilot is a single API-first backend that centralises patient tracking, structured workflows, an append-only clinical event log, deterministic escalation rules, and AI-assisted decision support. It is designed to make the above failure modes structurally impossible rather than culturally discouraged.
+These are problems that **non-clinical administrative staff already have the data and motivation to solve** — they admit patients, assign beds, and track discharges as part of their existing job. Hospital Copilot is built to digitise and make visible what they already do, then layer AI on top to surface insight from that operational data.
+
+**The clinical layer (optional).** Separately, when a hospital has staff willing to adopt it, the system can activate a per-hospital clinical module: nurses and doctors log vitals, medication events, and clinical notes; deterministic escalation rules fire alerts; AI synthesises clinical event history for doctors. This layer is valuable but depends on clinical staff buy-in — it is explicitly a second-phase, opt-in feature, not the core assumption.
+
+Hospital Copilot is a single API-first backend that makes operational visibility the guaranteed baseline, with clinical depth available as a switchable enhancement.
 
 ### 1.2 Problems We Are NOT Solving
 
@@ -19,12 +22,13 @@ These are explicit out-of-scope decisions, made to keep the system focused and t
 
 | Out of Scope | Why |
 |---|---|
+| Forcing clinical staff adoption | We cannot mandate that nurses and doctors log data. The operational layer works without them. Clinical features are opt-in per hospital. |
 | Clinical diagnosis | This is a physician's legal and professional responsibility. The system must not produce or imply diagnoses. |
 | Prescribing / medication orders | Prescribing involves drug databases, pharmacist review, and regulatory liability. Out of scope entirely. |
 | Replacing clinical judgment | AI outputs are suggestions for review, never authoritative instructions. |
 | Full EMR replacement | The system complements an existing HIS/EMR, not replaces it. We are the operational layer on top. |
-| Medical device integration | Vitals from bedside monitors, infusion pumps, ventilators — not in scope. Data is manually entered. |
-| Offline mode | All clinical data must be centrally stored and consistent. There is no offline-first design. |
+| Medical device integration | Vitals from bedside monitors, infusion pumps, ventilators — not in scope. Data is manually entered when the clinical module is on. |
+| Offline mode | All data must be centrally stored and consistent. There is no offline-first design. |
 | Billing and insurance | No financial workflows, insurance codes, or payer integrations. |
 | Regulatory compliance (HIPAA, GDPR) | PII encryption and access control are in place, but formal compliance certification is not part of this release. |
 | Scheduling and shift management | Staff scheduling, rosters, and leave management are separate concerns. |
@@ -49,17 +53,27 @@ These are valid problems that sit in the system's natural direction of growth bu
 
 ## 2. Users and Consumers
 
-### 2.1 Internal Users (clinical staff)
+### 2.1 Internal Users
 
-| Role | Who they are | What they need from the system |
+The system has two distinct user populations with different reliability of adoption.
+
+**Operational users (always-on — no clinical module required):**
+
+| Role | Who they are | What they need |
 |---|---|---|
-| **Ward Staff** | Reception, orderlies, ward helpers | Admit and discharge patients, see bed occupancy |
-| **Nurse** | Primary bedside caregiver | Record vitals and medication events, complete workflow steps, acknowledge escalation alerts |
-| **Doctor** | Physician, registrar, consultant | Review patient event timeline, request AI summaries, resolve alerts, write doctor notes |
-| **Hospital Admin** | IT manager, head of nursing | Manage workflow templates, escalation rules, user accounts within their hospital |
+| **Ward Staff** | Reception, ward clerks, orderlies | Admit and discharge patients, assign beds, see bed occupancy |
+| **Hospital Admin** | Matron, ward in-charge, IT manager | Bed utilisation dashboard, discharge pipeline, user/template/rule management |
+| **Senior Management** | Medical superintendent, COO, GM Operations | Hospital-wide occupancy, average LOS, ward performance, AI-generated operational summaries |
 | **SUPERADMIN** | Platform operator | Cross-hospital access for support and onboarding |
 
-**Key insight for design:** Nurses are the highest-frequency users. Every API endpoint that nurses hit (record event, complete step) must be low-latency and low-friction. The cost of a slow interface is a nurse skipping documentation.
+**Clinical users (opt-in — requires `clinical_module_enabled = True` on the hospital):**
+
+| Role | Who they are | What they need |
+|---|---|---|
+| **Nurse** | Primary bedside caregiver | Record vitals and medication events, complete workflow steps, acknowledge escalation alerts |
+| **Doctor** | Physician, registrar, consultant | Review patient event timeline, request AI clinical summaries, resolve alerts, write doctor notes |
+
+**Key insight for design:** The guaranteed user is the ward clerk and the matron — they already do this work on paper. The aspirational user is the nurse and doctor, but their adoption cannot be assumed. Every feature in the operational layer must deliver value with zero clinical data entered. Clinical features enrich the experience when data is available; they must not be required for the system to be useful.
 
 ### 2.2 External Consumers (future)
 
@@ -122,19 +136,33 @@ These are valid problems that sit in the system's natural direction of growth bu
 
 ## 4. Application Layer Map
 
-The Django application is divided into domain apps. The table below marks the **AI boundary** — which layers AI touches and which are entirely deterministic.
+The Django application is divided into domain apps. The table below marks the **AI boundary** and the **clinical module boundary**.
 
-| App | Responsibility | AI Involved? |
-|---|---|---|
-| `core` | Base mixins, Hospital model, exception hierarchy, pagination | No |
-| `users` | Authentication, JWT, role management | No |
-| `patients` | Patient records, ward/bed management, admissions | No |
-| `workflows` | Structured checklist templates and running instances | No |
-| `events` | Append-only clinical event log | No — but **feeds AI context** |
-| `escalations` | Deterministic rule engine that fires alerts from events | **No — intentionally not AI** |
-| `intelligence` | Claude API integration — summaries, risk flags, drug checks | **Yes — only layer** |
-| `communications` | WebSocket push, persistent notifications | No |
-| `integrations` | External system connectors (HL7/FHIR) | No |
+| App | Responsibility | Requires clinical module? | AI Involved? |
+|---|---|---|---|
+| `core` | Base mixins, Hospital model (incl. `clinical_module_enabled`), exception hierarchy | No | No |
+| `users` | Authentication, JWT, role management | No | No |
+| `patients` | Patient records, ward/bed management, admissions | No | No |
+| `workflows` | Structured checklist templates and running instances | Clinical module only | No |
+| `events` | Append-only clinical event log | Clinical module only | No — but **feeds AI context tier 2** |
+| `escalations` | Deterministic rule engine that fires alerts from events | Clinical module only | **No — intentionally not AI** |
+| `intelligence` | Claude API integration — operational summaries always; clinical summaries when available | No (degrades gracefully) | **Yes — only layer** |
+| `communications` | WebSocket push, persistent notifications | No | No |
+| `integrations` | External system connectors (HL7/FHIR) | No | No |
+
+### The clinical module flag (`Hospital.clinical_module_enabled`)
+
+Each hospital has a boolean flag that acts as the gate between the two tiers. When `False` (the default):
+- `events`, `escalations`, and `workflows` endpoints still exist but the escalation task dispatch is suppressed
+- The intelligence app builds context from operational data only (admissions, LOS, bed state)
+- The UI hides clinical tabs entirely — no overhead presented to staff who aren't using it
+
+When `True`:
+- Clinical staff can record events, complete workflow steps, and trigger escalation rules
+- The intelligence app adds clinical events and open alerts as a second context tier
+- AI summaries become richer without any change to the operational layer
+
+This design allows a hospital to start on the operational layer (zero friction for admin staff), prove value, and flip the switch when clinical staff are ready to buy in — without any code change or redeployment.
 
 ### Why escalations are deterministic and not AI-driven
 
@@ -153,11 +181,19 @@ Healthcare is a domain where a false positive or false negative can directly har
 
 ### 5.1 What the AI does
 
-The `intelligence` app uses Claude to:
-- Summarise a patient's last N events into a readable narrative for a doctor
-- Flag patterns that may warrant attention (e.g. gradually rising temperature over 6 hours)
-- Check a medication list for potential interactions (using Claude's knowledge, not a pharmacological DB)
-- Suggest a next action given the patient's clinical picture
+The `intelligence` app uses Claude to generate decision support in two tiers:
+
+**Tier 1 — Operational context (always available):**
+- Summarise a patient's admission — length of stay, bed/ward, key admission facts
+- Flag patients past expected discharge window or with unusually long stays
+- Generate a discharge readiness note based on admission timeline
+
+**Tier 2 — Clinical context (only when `clinical_module_enabled = True`):**
+- Synthesise a patient's last N clinical events into a narrative for a doctor
+- Flag patterns that may warrant clinical attention (e.g. gradually rising temperature)
+- Suggest a next clinical action given the patient's event history
+
+The prompt builder checks the hospital flag and includes Tier 2 data only when it is available and enabled. When Tier 2 data is absent, the AI is explicitly instructed to say so rather than speculate.
 
 ### 5.2 What the AI is structurally prevented from doing
 
@@ -179,15 +215,26 @@ Every AI-generated output:
 
 ### 5.4 Grounded prompts reduce hallucination risk
 
-AI prompts are built from structured, factual data already in the database (event payloads, admission timestamps, recorded vitals). We do not ask Claude to infer things not in the data. The prompt structure is:
+AI prompts are built exclusively from structured, factual data already in the database (event payloads, admission timestamps, recorded vitals). We do not ask Claude to infer things not in the data. The prompt structure follows a strict template:
 
 ```
-"Here are the last N clinical events for this patient, in chronological order: [structured data].
-Summarise what has happened and flag anything that warrants clinical attention.
-Do not diagnose. Frame all observations as things that may warrant clinician review."
+CONTEXT (always present):
+Patient admitted [date], ward [X], bed [Y], day [N] of admission.
+
+CLINICAL EVENTS (only when clinical_module_enabled is True and events exist):
+Last N clinical events in chronological order: [structured data]
+
+OPEN ALERTS (only when clinical_module_enabled is True and alerts exist):
+Active escalation alerts: [list]
+
+INSTRUCTION:
+Summarise what is known. Flag anything that warrants attention.
+If clinical data is absent, say so explicitly — do not speculate.
+Do not diagnose. Do not prescribe. Frame all observations as things
+that may warrant clinician review.
 ```
 
-This bounds Claude's output to what the data contains, dramatically reducing the space for hallucination.
+The "if absent, say so" instruction is load-bearing. Without it, Claude will attempt to fill gaps with plausible-sounding but fabricated clinical observations — which is exactly the false positive/negative failure mode we cannot accept in healthcare.
 
 ---
 
@@ -252,9 +299,13 @@ Client POST /api/v1/intelligence/query/
   → HTTP 202 Accepted returned immediately (request_id in body)
   → Celery task enqueued (Redis DB 2)
   → Celery worker picks up task
-  → Builds prompt from patient events (PostgreSQL read)
+  → Tier 1: reads admission, LOS, bed/ward from PostgreSQL (always)
+  → Tier 2: if hospital.clinical_module_enabled:
+        reads last N ClinicalEvents + open EscalationAlerts from PostgreSQL
+  → Builds prompt from available data; omits Tier 2 section if not enabled
   → anthropic.messages.create() → Claude API (2–15 s)
-  → Updates IntelligenceRequest (status=COMPLETED, response_text, tokens_used)
+  → Updates IntelligenceRequest (status=COMPLETED, response_text, tokens_used,
+      latency_ms, clinical_context_used=True/False)
   → Pushes WebSocket notification to requesting user (Redis DB 0)
   → Client receives push; fetches result from GET /intelligence/<id>/
 ```
@@ -263,7 +314,9 @@ Client POST /api/v1/intelligence/query/
 
 ```
 POST /api/v1/events/ → ClinicalEvent saved to PostgreSQL
-  → record_event() enqueues evaluate_escalation_rules.delay(admission_id)
+  → record_event() checks hospital.clinical_module_enabled
+  → if True: enqueues evaluate_escalation_rules.delay(admission_id)
+  → if False: skips task dispatch entirely
   → Celery: loads active EscalationRules for the hospital
   → Evaluates rule conditions against latest event payload (JSON DSL)
   → Matching rule → EscalationAlert created (status=OPEN)

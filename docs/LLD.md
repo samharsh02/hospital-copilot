@@ -54,7 +54,7 @@ This contract ensures that even if Claude returns a hallucinated or harmful outp
 
 ---
 
-### 1.1 `hospitals` (apps.core — Hospital)
+### 1.1 `hospitals` (apps.core — Hospital) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
@@ -65,6 +65,7 @@ This contract ensures that even if Claude returns a hallucinated or harmful outp
 | `state` | varchar(100) | not null |
 | `bed_count` | integer | not null |
 | `is_active` | boolean | not null, default true |
+| `clinical_module_enabled` | boolean | not null, default **false** |
 | `created_at` | timestamptz | not null, auto |
 | `updated_at` | timestamptz | not null, auto |
 | `created_by_id` | bigint | FK → users(id), nullable, SET NULL |
@@ -72,6 +73,8 @@ This contract ensures that even if Claude returns a hallucinated or harmful outp
 | `is_deleted` | boolean | not null, default false, indexed |
 | `deleted_at` | timestamptz | nullable |
 | `deleted_by_id` | bigint | FK → users(id), nullable, SET NULL |
+
+**Design note on `clinical_module_enabled`:** This flag is the architectural gate between the operational layer (always available) and the clinical layer (opt-in per hospital). When `False`, the escalation task dispatch is skipped after each event, and the intelligence prompt builder omits clinical context. The operational layer — patient registration, admissions, bed management, and AI summaries based on admission data — works fully regardless of this flag. A hospital starts with `False`, gains value from the operational layer, and flips to `True` only when clinical staff are willing to participate. No code change or redeployment is required.
 
 ---
 
@@ -240,7 +243,7 @@ Append-only: no UPDATE or DELETE is exposed via the API. `recorded_at` is indexe
 
 ---
 
-### 1.11 `escalation_rules` (apps.escalations — EscalationRule) — planned
+### 1.11 `escalation_rules` (apps.escalations — EscalationRule) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
@@ -249,7 +252,7 @@ Append-only: no UPDATE or DELETE is exposed via the API. `recorded_at` is indexe
 | `name` | varchar(200) | not null |
 | `condition` | jsonb | not null — rule DSL evaluated against event payload |
 | `priority` | varchar(10) | not null, choices: LOW \| MEDIUM \| HIGH \| CRITICAL |
-| `notify_roles` | varchar[] | array of UserRole values — which roles receive the alert push |
+| `notify_roles` | jsonb | JSON array of UserRole strings — stored as JSONField (not ArrayField) for SQLite test compatibility |
 | `is_active` | boolean | not null, default true |
 | + BaseMixin + SoftDeleteMixin columns | | |
 
@@ -263,7 +266,7 @@ The evaluator in `escalations/services.py` supports `eq`, `ne`, `lt`, `lte`, `gt
 
 ---
 
-### 1.12 `escalation_alerts` (apps.escalations — EscalationAlert) — planned
+### 1.12 `escalation_alerts` (apps.escalations — EscalationAlert) ✅ implemented
 
 | Column | Type | Constraints |
 |--------|------|-------------|
@@ -290,15 +293,25 @@ Status transitions: `OPEN → ACKNOWLEDGED` (NURSE+) `→ RESOLVED` (DOCTOR+). O
 | `patient_id` | bigint | FK → patients(id), not null, CASCADE |
 | `admission_id` | bigint | FK → admissions(id), not null, CASCADE |
 | `requested_by_id` | bigint | FK → users(id), nullable, SET NULL |
-| `prompt_type` | varchar(20) | not null, choices: SUMMARY \| RISK\_FLAG \| NEXT\_ACTION \| DRUG\_CHECK |
+| `prompt_type` | varchar(20) | not null, choices: PATIENT\_SUMMARY \| DISCHARGE\_READINESS \| RISK\_FLAG \| CLINICAL\_SUMMARY |
 | `status` | varchar(20) | not null, choices: PENDING \| COMPLETED \| FAILED |
+| `clinical_context_used` | boolean | not null, default false — records whether Tier 2 data was included in the prompt |
 | `response_text` | text | nullable |
+| `disclaimer` | text | not null — mandatory AI-generated notice prepended to every response |
 | `tokens_used` | integer | nullable |
 | `latency_ms` | integer | nullable |
 | `created_at` | timestamptz | not null, auto |
 | `completed_at` | timestamptz | nullable |
 
-**Design note:** Every AI query is persisted. This creates an audit trail: which clinician asked what, with what patient context, and what Claude responded. Token counts and latency support cost monitoring and performance analysis. If a response is later disputed, the exact request can be reconstructed.
+**Design note on prompt types:**
+- `PATIENT_SUMMARY` — always available; summarises admission facts, LOS, ward, bed; includes clinical events if Tier 2 is enabled
+- `DISCHARGE_READINESS` — always available; flags whether this patient's LOS seems typical or extended based on operational data
+- `RISK_FLAG` — requires clinical module; needs clinical event history to flag patterns
+- `CLINICAL_SUMMARY` — requires clinical module; synthesises clinical events into a narrative for the treating doctor
+
+**Design note on `clinical_context_used`:** This field is written by the Celery task at query time. It records whether the hospital had `clinical_module_enabled = True` and whether clinical events were actually present. A future query can compare the richness of responses between hospitals with and without the clinical module, informing the decision of whether to pitch the feature to a new hospital.
+
+**Design note on audit:** Every AI query is persisted with the full response. This creates a permanent record: which user asked what, at what time, with what patient context, and what Claude said. Token counts and latency support cost monitoring. If a response is later disputed, the exact request can be reconstructed from this table.
 
 ---
 
@@ -428,7 +441,7 @@ Response `200`: `{"access": "<jwt>", "refresh": "<jwt>"}`
 
 ---
 
-### 2.5 Escalations (`/api/v1/escalation-*`) — planned
+### 2.5 Escalations (`/api/v1/escalation-*`) ✅ implemented
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -446,11 +459,15 @@ Response `200`: `{"access": "<jwt>", "refresh": "<jwt>"}`
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/intelligence/query/` | NURSE+ | Submit AI query. Returns `202 Accepted` with `{"request_id": <id>}` |
+| `POST` | `/intelligence/query/` | required (ADMIN+) | Submit AI query. Returns `202 Accepted` with `{"request_id": <id>}` |
 | `GET` | `/intelligence/<id>/` | required | Poll status and result. Status: PENDING \| COMPLETED \| FAILED |
-| `GET` | `/patients/<id>/intelligence/` | required | Past AI queries for this patient |
+| `GET` | `/patients/<id>/intelligence/` | required | Past AI queries for this patient (hospital-scoped) |
 
-**Design note:** The `202 Accepted` pattern is intentional. Making AI calls synchronously would hold a uvicorn worker for 2–15 seconds, blocking other requests. The client either polls `GET /intelligence/<id>/` or waits for a WebSocket push.
+**Design note on access:** AI queries are available to ADMIN and above (not nurses directly) in V1 — management and senior staff are the primary consumers of operational summaries. Clinical staff can be added to the permitted roles when the clinical module is in active use.
+
+**Design note on async pattern:** The `202 Accepted` pattern is intentional. Making AI calls synchronously would hold a uvicorn worker for 2–15 seconds, blocking other requests. The client either polls `GET /intelligence/<id>/` or waits for a WebSocket push when the task completes.
+
+**Design note on context tiers:** The same endpoint serves both tiers transparently. The Celery task reads `hospital.clinical_module_enabled` and includes or excludes clinical data accordingly. The `clinical_context_used` field in the response tells the client (and any future analytics) which tier was applied.
 
 ---
 
@@ -523,17 +540,28 @@ def record_event(*, user, patient, admission, event_type, payload, notes="") -> 
     # After save: enqueues evaluate_escalation_rules.delay(admission.pk) [planned]
 ```
 
-### Key service contracts (planned)
+### Key service contracts (implemented — escalations)
 
 ```python
 # apps/escalations/services.py
 def evaluate_escalation_rules(admission_id: int) -> list[EscalationAlert]:
     # Called as Celery task after every clinical event
-    # Loads all active EscalationRules for the hospital
-    # Evaluates each rule's condition JSON against the latest event payload
+    # Loads active EscalationRules for the hospital
+    # Evaluates each rule's condition DSL against the latest event payload
+    # Deduplicates: skips if an OPEN alert for the same rule+admission exists
     # Creates EscalationAlert rows for matching rules
-    # Pushes WebSocket notification to hospital group
+    # Pushes best-effort WebSocket notification to hospital group
 
+def acknowledge_alert(*, user, alert) -> EscalationAlert:
+    # Raises ValidationError if alert is not OPEN
+
+def resolve_alert(*, user, alert) -> EscalationAlert:
+    # Raises ConflictError if already RESOLVED
+```
+
+### Key service contracts (planned — intelligence)
+
+```python
 # apps/intelligence/services.py
 def request_ai_query(*, user, patient, admission, prompt_type) -> IntelligenceRequest:
     # Creates IntelligenceRequest (status=PENDING)
@@ -542,12 +570,17 @@ def request_ai_query(*, user, patient, admission, prompt_type) -> IntelligenceRe
 
 def run_ai_query(request_id: int) -> None:
     # Celery task
-    # Fetches IntelligenceRequest and its patient/admission context
-    # Builds prompt from last N ClinicalEvents (structured data only)
+    # Fetches IntelligenceRequest + patient/admission context
+    # Tier 1 (always): admission date, LOS, ward, bed, patient demographics
+    # Tier 2 (if hospital.clinical_module_enabled):
+    #   last 20 ClinicalEvents + open EscalationAlerts for this admission
+    # Builds structured prompt; instructs Claude to say "insufficient data" not speculate
     # Calls anthropic.messages.create() with the prompt
-    # Updates IntelligenceRequest: status=COMPLETED, response_text, tokens_used, latency_ms
-    # Pushes WebSocket push to requesting user
-    # On failure (after retries): status=FAILED
+    # Prepends mandatory disclaimer to response_text
+    # Updates IntelligenceRequest: status=COMPLETED, clinical_context_used,
+    #   response_text, tokens_used, latency_ms, completed_at
+    # Pushes WebSocket notification to requesting user
+    # On failure after retries: status=FAILED
 ```
 
 ---
@@ -686,22 +719,24 @@ Defaults: `page_size=25`, max `page_size=200`.
 
 ## 9. Permission Matrix
 
-| Endpoint group | WARD\_STAFF | NURSE | DOCTOR | ADMIN | SUPERADMIN |
-|----------------|:-----------:|:-----:|:------:|:-----:|:----------:|
-| Auth (register / login / me) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Patient read | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Patient create | — | — | — | ✓ | ✓ |
-| Patient update (non-PII) | — | ✓ | ✓ | ✓ | ✓ |
-| Patient soft-delete | — | — | — | ✓ | ✓ |
-| Admit / discharge | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Record clinical event | — | ✓ | ✓ | ✓ | ✓ |
-| Complete workflow step | — | ✓ | ✓ | ✓ | ✓ |
-| Cancel workflow | — | ✓ | ✓ | ✓ | ✓ |
-| Acknowledge escalation alert | — | ✓ | ✓ | ✓ | ✓ |
-| Resolve escalation alert | — | — | ✓ | ✓ | ✓ |
-| Submit AI query | — | ✓ | ✓ | ✓ | ✓ |
-| Manage templates / rules | — | — | — | ✓ | ✓ |
-| Cross-hospital access | — | — | — | — | ✓ |
+| Endpoint group | WARD\_STAFF | NURSE | DOCTOR | ADMIN | SUPERADMIN | Clinical module required? |
+|----------------|:-----------:|:-----:|:------:|:-----:|:----------:|:-------------------------:|
+| Auth (register / login / me) | ✓ | ✓ | ✓ | ✓ | ✓ | No |
+| Patient read | ✓ | ✓ | ✓ | ✓ | ✓ | No |
+| Patient create | — | — | — | ✓ | ✓ | No |
+| Patient update (non-PII) | — | ✓ | ✓ | ✓ | ✓ | No |
+| Patient soft-delete | — | — | — | ✓ | ✓ | No |
+| Admit / discharge | ✓ | ✓ | ✓ | ✓ | ✓ | No |
+| Record clinical event | — | ✓ | ✓ | ✓ | ✓ | Yes |
+| Complete workflow step | — | ✓ | ✓ | ✓ | ✓ | Yes |
+| Cancel workflow | — | ✓ | ✓ | ✓ | ✓ | Yes |
+| View escalation rules/alerts | — | — | — | ✓ | ✓ | Yes |
+| Acknowledge escalation alert | — | ✓ | ✓ | ✓ | ✓ | Yes |
+| Resolve escalation alert | — | — | ✓ | ✓ | ✓ | Yes |
+| Submit AI query | — | — | — | ✓ | ✓ | No (degrades gracefully) |
+| Manage templates / rules | — | — | — | ✓ | ✓ | No / Yes respectively |
+| Toggle clinical module flag | — | — | — | — | ✓ | — |
+| Cross-hospital access | — | — | — | — | ✓ | — |
 
 ---
 

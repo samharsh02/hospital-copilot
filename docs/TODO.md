@@ -24,10 +24,12 @@ This file is the single source of truth for what's done, what's next, and what's
 ### `apps/core` — Base layer
 - [x] `BaseMixin` — `created_at`, `updated_at`, `created_by`, `updated_by`
 - [x] `SoftDeleteMixin` — `is_deleted`, `deleted_at`, `deleted_by`, `soft_delete()`, `ActiveManager`
-- [x] `Hospital` model — name, type, city, state, bed_count, is_active
+- [x] `Hospital` model — name, type, city, state, bed_count, is_active, **`clinical_module_enabled`** (default False)
+- [x] `clinical_module_enabled` — gates clinical features (events, escalations, workflows) per hospital; operational layer always works regardless
 - [x] Exception hierarchy — `AppError`, `NotFoundError`, `PermissionDeniedError`, `ValidationError`, `ConflictError`, `custom_exception_handler`
 - [x] `StandardPagination`, `elapsed_minutes()`, `format_duration()`
-- [x] Migrations (`0001_initial`, `0002_initial`)
+- [x] `HospitalAdmin` with `list_editable` for `clinical_module_enabled` and `is_active`
+- [x] Migrations (`0001_initial`, `0002_initial`, `0003_hospital_clinical_module_flag`)
 - [x] Tests — 55 passing
 
 ### `apps/users` — Auth
@@ -111,16 +113,35 @@ Rules that fire when a patient condition or workflow threshold is breached.
 - [x] Migration `0001_initial`
 - [x] Tests — 65 passing (37 service + 28 view, including end-to-end event→task→alert pipeline)
 
-### 5. `apps/intelligence` — Claude-powered suggestions
+### 5. `apps/intelligence` — Claude-powered decision support
 
-Uses the Anthropic API to generate clinical decision support from the patient's event history.
+Two-tier context: Tier 1 (operational data, always) + Tier 2 (clinical events + alerts, only when `clinical_module_enabled = True`). Every response carries a mandatory disclaimer. Claude is instructed to say "insufficient data" rather than speculate when context is sparse.
 
-- [ ] `IntelligenceRequest` model — patient FK, admission FK, requested_by, prompt_type (SUMMARY / RISK_FLAG / NEXT_ACTION / DRUG_CHECK), created_at, response_text, tokens_used, latency_ms
-- [ ] `generate_summary()` service — builds context from recent events, calls `anthropic.messages.create`, stores result
-- [ ] Async task (Celery) for non-blocking AI calls
-- [ ] Endpoints: `POST /api/v1/intelligence/query/`, `GET /api/v1/patients/<id>/intelligence/`
-- [ ] Rate-limit per hospital (don't hammer Anthropic)
-- [ ] Tests (mock Anthropic SDK in tests)
+**Prompt types:**
+- `PATIENT_SUMMARY` — always available; admission timeline, LOS, ward/bed, demographics; enriched with clinical events if Tier 2 is enabled
+- `DISCHARGE_READINESS` — always available; flags if LOS is atypically long based on operational data
+- `RISK_FLAG` — clinical module only; needs clinical event history to flag patterns (e.g. SpO₂ trend)
+- `CLINICAL_SUMMARY` — clinical module only; synthesises clinical events into a narrative for the treating doctor
+
+**To implement:**
+- [ ] `apps/intelligence/constants.py` — `PromptType` choices, `RequestStatus` choices
+- [ ] `apps/intelligence/models.py` — `IntelligenceRequest` model: patient FK, admission FK, requested_by (nullable SET NULL), prompt_type, status (PENDING/COMPLETED/FAILED), clinical_context_used (bool), response_text (text, nullable), disclaimer (text), tokens_used, latency_ms, completed_at
+- [ ] `apps/intelligence/services.py`:
+  - `request_ai_query(*, user, patient, admission, prompt_type)` — creates row (PENDING), enqueues task, returns immediately
+  - `build_prompt(request)` — Tier 1 always + Tier 2 if `hospital.clinical_module_enabled`
+  - `run_ai_query(request_id)` — Celery task; calls Anthropic API; writes result; pushes WS notification; sets FAILED on exhaustion
+  - `get_request_queryset(*, user)` — hospital-scoped
+- [ ] `apps/intelligence/tasks.py` — `run_ai_query_task` with 2 retries + exponential backoff
+- [ ] `apps/intelligence/serializers.py` — `IntelligenceRequestSerializer`, `IntelligenceQueryCreateSerializer`
+- [ ] `apps/intelligence/views.py` — `QueryCreateView` (POST, returns 202), `QueryDetailView` (GET), `PatientIntelligenceHistoryView` (GET, nested under patients urls)
+- [ ] `apps/intelligence/urls.py`
+- [ ] `apps/intelligence/admin.py`
+- [ ] Migration `0001_initial`
+- [ ] Tests (mock `anthropic.Anthropic` in tests):
+  - Service: context building with/without clinical module, prompt type routing, task retry/failure, hospital scoping
+  - Views: 202 on create, poll pending/completed/failed, history list, 403 on wrong role, 404 on other hospital
+- [ ] Update `config/urls.py` to include intelligence urls
+- [ ] Update `INSTALLED_APPS` if not already listed
 
 ### 6. `apps/communications` — WebSocket notifications
 
