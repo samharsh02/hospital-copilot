@@ -311,6 +311,8 @@ class TestEventTriggersEscalation(APITestCase):
 
     def setUp(self):
         self.hospital = make_hospital()
+        self.hospital.clinical_module_enabled = True
+        self.hospital.save(update_fields=["clinical_module_enabled"])
         self.admin = make_user("admin1", UserRole.ADMIN, self.hospital)
         self.nurse = make_user("nurse1", UserRole.NURSE, self.hospital)
         self.patient = make_patient(self.hospital)

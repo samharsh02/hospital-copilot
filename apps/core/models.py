@@ -68,6 +68,14 @@ class Hospital(BaseMixin, SoftDeleteMixin):
     state = models.CharField(max_length=100)
     bed_count = models.IntegerField()
     is_active = models.BooleanField(default=True)
+    clinical_module_enabled = models.BooleanField(
+        default=False,
+        help_text=(
+            "When enabled, clinical features (event recording, vitals-based escalations, "
+            "workflow checklists) are available to clinical staff. Operational features "
+            "(bed management, admissions, dashboards) always work regardless of this flag."
+        ),
+    )
 
     class Meta:
         db_table = "hospitals"

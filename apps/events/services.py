@@ -29,13 +29,14 @@ def record_event(
         updated_by=user,
     )
 
-    # Evaluate escalation rules against the new event (runs synchronously in tests,
-    # dispatched to Celery worker in production).
+    # Evaluate escalation rules only when the clinical module is enabled for this hospital.
+    # Wrapped in try/except so task dispatch never blocks event recording.
     try:
-        from apps.escalations.tasks import evaluate_escalation_rules_task
-        evaluate_escalation_rules_task.delay(admission.pk)
+        if patient.hospital.clinical_module_enabled:
+            from apps.escalations.tasks import evaluate_escalation_rules_task
+            evaluate_escalation_rules_task.delay(admission.pk)
     except Exception:
-        pass  # Never fail event recording because of task dispatch
+        pass
 
     return event
 
