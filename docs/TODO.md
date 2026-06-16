@@ -113,7 +113,7 @@ Rules that fire when a patient condition or workflow threshold is breached.
 - [x] Migration `0001_initial`
 - [x] Tests — 65 passing (37 service + 28 view, including end-to-end event→task→alert pipeline)
 
-### 5. `apps/intelligence` — Claude-powered decision support
+### 5. `apps/intelligence` — Claude-powered decision support ✅ DONE
 
 Two-tier context: Tier 1 (operational data, always) + Tier 2 (clinical events + alerts, only when `clinical_module_enabled = True`). Every response carries a mandatory disclaimer. Claude is instructed to say "insufficient data" rather than speculate when context is sparse.
 
@@ -123,25 +123,23 @@ Two-tier context: Tier 1 (operational data, always) + Tier 2 (clinical events + 
 - `RISK_FLAG` — clinical module only; needs clinical event history to flag patterns (e.g. SpO₂ trend)
 - `CLINICAL_SUMMARY` — clinical module only; synthesises clinical events into a narrative for the treating doctor
 
-**To implement:**
-- [ ] `apps/intelligence/constants.py` — `PromptType` choices, `RequestStatus` choices
-- [ ] `apps/intelligence/models.py` — `IntelligenceRequest` model: patient FK, admission FK, requested_by (nullable SET NULL), prompt_type, status (PENDING/COMPLETED/FAILED), clinical_context_used (bool), response_text (text, nullable), disclaimer (text), tokens_used, latency_ms, completed_at
-- [ ] `apps/intelligence/services.py`:
-  - `request_ai_query(*, user, patient, admission, prompt_type)` — creates row (PENDING), enqueues task, returns immediately
-  - `build_prompt(request)` — Tier 1 always + Tier 2 if `hospital.clinical_module_enabled`
-  - `run_ai_query(request_id)` — Celery task; calls Anthropic API; writes result; pushes WS notification; sets FAILED on exhaustion
-  - `get_request_queryset(*, user)` — hospital-scoped
-- [ ] `apps/intelligence/tasks.py` — `run_ai_query_task` with 2 retries + exponential backoff
-- [ ] `apps/intelligence/serializers.py` — `IntelligenceRequestSerializer`, `IntelligenceQueryCreateSerializer`
-- [ ] `apps/intelligence/views.py` — `QueryCreateView` (POST, returns 202), `QueryDetailView` (GET), `PatientIntelligenceHistoryView` (GET, nested under patients urls)
-- [ ] `apps/intelligence/urls.py`
-- [ ] `apps/intelligence/admin.py`
-- [ ] Migration `0001_initial`
-- [ ] Tests (mock `anthropic.Anthropic` in tests):
-  - Service: context building with/without clinical module, prompt type routing, task retry/failure, hospital scoping
-  - Views: 202 on create, poll pending/completed/failed, history list, 403 on wrong role, 404 on other hospital
-- [ ] Update `config/urls.py` to include intelligence urls
-- [ ] Update `INSTALLED_APPS` if not already listed
+- [x] `apps/intelligence/constants.py` — `PromptType`, `RequestStatus`, `CLINICAL_ONLY_PROMPT_TYPES`, `DISCLAIMER`
+- [x] `apps/intelligence/models.py` — `IntelligenceRequest`: patient FK, admission FK, requested_by (nullable SET NULL), prompt_type, status (PENDING/COMPLETED/FAILED), clinical_context_used (bool), response_text (text, nullable), disclaimer (text), tokens_used, latency_ms, completed_at
+- [x] `apps/intelligence/services.py`:
+  - `request_ai_query(*, user, patient, admission, prompt_type)` — creates row (PENDING), enqueues task, returns 202 immediately
+  - `_build_tier1_context(admission)` — MRN, age, gender, LOS, ward/bed; handles string DOB from in-memory ORM objects
+  - `_build_tier2_context(admission)` — last 20 `ClinicalEvent` rows + open `EscalationAlert` rows
+  - `build_prompt(request)` — Tier 1 always + Tier 2 if `hospital.clinical_module_enabled`; returns `(prompt_text, clinical_context_used)`
+  - `run_ai_query(request_id)` — calls Anthropic API; writes result + disclaimer; pushes WS notification; re-raises on failure (task owns FAILED)
+  - `mark_request_failed(request_id)` — sets FAILED + completed_at
+  - `get_request_queryset(*, user)` — hospital-scoped; SUPERADMIN sees all
+- [x] `apps/intelligence/tasks.py` — `run_ai_query_task` (bind=True, max_retries=2, exponential backoff 2^n × 60 s)
+- [x] `apps/intelligence/serializers.py` — `IntelligenceRequestSerializer`, `IntelligenceQueryCreateSerializer`
+- [x] `apps/intelligence/views.py` — `QueryCreateView` (POST ADMIN+, returns 202), `QueryDetailView` (GET), `PatientIntelligenceHistoryView` (GET, nested under patients urls)
+- [x] `apps/intelligence/urls.py`
+- [x] `apps/intelligence/admin.py`
+- [x] Migration `0001_initial`
+- [x] Tests — 46 passing (28 service + 18 view); Anthropic patched via `patch("apps.intelligence.services.anthropic")`
 
 ### 6. `apps/communications` — WebSocket notifications
 

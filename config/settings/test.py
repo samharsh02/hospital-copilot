@@ -20,3 +20,6 @@ FIELD_ENCRYPTION_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 # rule evaluation) execute inline without a running broker.
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
+
+ANTHROPIC_API_KEY = "test-key-not-used"
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
