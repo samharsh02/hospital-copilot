@@ -141,16 +141,21 @@ Two-tier context: Tier 1 (operational data, always) + Tier 2 (clinical events + 
 - [x] Migration `0001_initial`
 - [x] Tests — 46 passing (28 service + 18 view); Anthropic patched via `patch("apps.intelligence.services.anthropic")`
 
-### 6. `apps/communications` — WebSocket notifications
+### 6. `apps/communications` — WebSocket notifications ✅ DONE
 
 Real-time push to connected clients (nurse station, doctor tablet) using Django Channels.
 
-- [ ] Django Channels routing (`config/asgi.py` already has ASGI setup)
-- [ ] `NotificationConsumer` — WebSocket consumer, auth via JWT query param
-- [ ] Server-side push: when an EscalationAlert fires → push to all users in the hospital's group
-- [ ] `Notification` model — user FK, message, type, read_at, created_at (for persistence / unread count)
-- [ ] REST endpoints: `GET /api/v1/notifications/` (list), `POST /api/v1/notifications/<id>/read/`
-- [ ] Tests (use `channels.testing.WebsocketCommunicator`)
+- [x] `HospitalConsumer` (AsyncJsonWebsocketConsumer) — JWT auth via `?token=` query param; joins `hospital_<id>` channel group on connect; handles `notify` events from group_send
+- [x] Close codes: 4001 (missing/invalid token), 4002 (no hospital — SUPERADMIN not supported on WS)
+- [x] `notify` event handler: persists `Notification` to DB for the connected user first, then delivers JSON to client (ordering guarantees DB write precedes receive_json in tests)
+- [x] `Notification` model — user FK, hospital FK (nullable), kind (ESCALATION/INTELLIGENCE_COMPLETE/WORKFLOW_UPDATE/GENERAL), payload (JSONField), read_at (nullable), `is_read` property, BaseMixin
+- [x] `GET /api/v1/notifications/` — list own notifications, paginated; `?unread=true` filter
+- [x] `POST /api/v1/notifications/<id>/read/` — mark single notification read (idempotent)
+- [x] `POST /api/v1/notifications/read-all/` — mark all own unread read
+- [x] WebSocket routing wired into `config/asgi.py`; REST URLs in `config/urls.py`
+- [x] `daphne` installed (required by channels.testing for WebsocketCommunicator)
+- [x] Migration `0001_initial`
+- [x] Tests — 35 passing (9 consumer via WebsocketCommunicator + TransactionTestCase, 11 service, 15 view)
 
 ### 7. `apps/integrations` — External system connectors
 
