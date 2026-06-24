@@ -279,3 +279,124 @@ class TestWardBedsViews(APITestCase):
     def test_unauthenticated_ward_returns_401(self):
         resp = self.client_class().get("/api/v1/wards/")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+# --------------- Ward CRUD ---------------
+
+class TestWardCRUD(APITestCase):
+    def setUp(self):
+        self.hospital = make_hospital()
+        self.admin = make_user("admin_wc", UserRole.ADMIN, self.hospital)
+        self.nurse = make_user("nurse_wc", UserRole.NURSE, self.hospital)
+
+    def test_admin_can_create_ward(self):
+        resp = auth_client(self.admin).post("/api/v1/wards/", {"name": "ICU", "capacity": 20})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["name"], "ICU")
+        self.assertEqual(resp.data["capacity"], 20)
+
+    def test_nurse_cannot_create_ward(self):
+        resp = auth_client(self.nurse).post("/api/v1/wards/", {"name": "ICU", "capacity": 20})
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_create_ward_missing_capacity(self):
+        resp = auth_client(self.admin).post("/api/v1/wards/", {"name": "ICU"})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_admin_can_retrieve_ward(self):
+        ward = make_ward(self.hospital)
+        resp = auth_client(self.admin).get(f"/api/v1/wards/{ward.pk}/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["name"], ward.name)
+
+    def test_admin_can_update_ward(self):
+        ward = make_ward(self.hospital)
+        resp = auth_client(self.admin).patch(f"/api/v1/wards/{ward.pk}/", {"name": "Ward Updated", "capacity": 15})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["name"], "Ward Updated")
+
+    def test_update_ward_wrong_hospital_returns_404(self):
+        h2 = make_hospital("Other")
+        ward2 = make_ward(h2, "Other Ward")
+        resp = auth_client(self.admin).patch(f"/api/v1/wards/{ward2.pk}/", {"name": "X"})
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_admin_can_delete_ward(self):
+        ward = make_ward(self.hospital)
+        resp = auth_client(self.admin).delete(f"/api/v1/wards/{ward.pk}/")
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Ward.objects.filter(pk=ward.pk).exists())
+
+    def test_delete_ward_with_occupied_bed_returns_400(self):
+        ward = make_ward(self.hospital)
+        bed = make_bed(ward, "B1")
+        bed.is_occupied = True
+        bed.save()
+        resp = auth_client(self.admin).delete(f"/api/v1/wards/{ward.pk}/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_nurse_cannot_delete_ward(self):
+        ward = make_ward(self.hospital)
+        resp = auth_client(self.nurse).delete(f"/api/v1/wards/{ward.pk}/")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+# --------------- Bed CRUD ---------------
+
+class TestBedCRUD(APITestCase):
+    def setUp(self):
+        self.hospital = make_hospital()
+        self.admin = make_user("admin_bc", UserRole.ADMIN, self.hospital)
+        self.nurse = make_user("nurse_bc", UserRole.NURSE, self.hospital)
+        self.ward = make_ward(self.hospital)
+
+    def test_admin_can_add_bed_to_ward(self):
+        resp = auth_client(self.admin).post(f"/api/v1/wards/{self.ward.pk}/beds/", {"number": "101"})
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["number"], "101")
+
+    def test_duplicate_bed_number_returns_409(self):
+        make_bed(self.ward, "101")
+        resp = auth_client(self.admin).post(f"/api/v1/wards/{self.ward.pk}/beds/", {"number": "101"})
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_nurse_cannot_add_bed(self):
+        resp = auth_client(self.nurse).post(f"/api/v1/wards/{self.ward.pk}/beds/", {"number": "101"})
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_add_bed_wrong_hospital_returns_404(self):
+        h2 = make_hospital("Other")
+        ward2 = make_ward(h2)
+        resp = auth_client(self.admin).post(f"/api/v1/wards/{ward2.pk}/beds/", {"number": "101"})
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_admin_can_update_bed_number(self):
+        bed = make_bed(self.ward, "B1")
+        resp = auth_client(self.admin).patch(f"/api/v1/beds/{bed.pk}/", {"number": "B1-Updated"})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["number"], "B1-Updated")
+
+    def test_admin_can_delete_bed(self):
+        bed = make_bed(self.ward, "B99")
+        resp = auth_client(self.admin).delete(f"/api/v1/beds/{bed.pk}/")
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Bed.objects.filter(pk=bed.pk).exists())
+
+    def test_delete_occupied_bed_returns_400(self):
+        bed = make_bed(self.ward, "B99")
+        bed.is_occupied = True
+        bed.save()
+        resp = auth_client(self.admin).delete(f"/api/v1/beds/{bed.pk}/")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bed_from_other_hospital_returns_404(self):
+        h2 = make_hospital("Other")
+        ward2 = make_ward(h2)
+        bed2 = make_bed(ward2, "B1")
+        resp = auth_client(self.admin).delete(f"/api/v1/beds/{bed2.pk}/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_nurse_cannot_delete_bed(self):
+        bed = make_bed(self.ward, "B1")
+        resp = auth_client(self.nurse).delete(f"/api/v1/beds/{bed.pk}/")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

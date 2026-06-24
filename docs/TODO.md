@@ -61,6 +61,9 @@ Work through the apps in dependency order. Each app should follow the same patte
 - [x] `POST /api/v1/patients/<id>/discharge/` — discharge; frees bed; guard: not admitted 400
 - [x] `GET /api/v1/patients/<id>/admissions/` — admission history
 - [x] `GET /api/v1/wards/`, `GET /api/v1/wards/<id>/beds/`
+- [x] `POST /api/v1/wards/`, `PATCH/DELETE /api/v1/wards/<id>/` — ward management (ADMIN+)
+- [x] `POST /api/v1/wards/<id>/beds/`, `PATCH/DELETE /api/v1/beds/<id>/` — bed management (ADMIN+)
+- [x] `GET /api/v1/hospital/` — hospital config endpoint (exposes `clinical_module_enabled` to frontend)
 - [x] `permissions.py` — `IsNurseOrAbove`, `IsAdminOrAbove` role-rank permission classes
 - [x] `FIELD_ENCRYPTION_KEY` wired into settings; `encrypted_model_fields` in INSTALLED_APPS
 - [x] Migration `0001_initial`
@@ -176,6 +179,19 @@ Connect to hospital HIS/EMR systems, lab systems, etc.
 - [ ] **Migrate existing PostgreSQL data** — current data is in the host PostgreSQL; after `docker compose up`, run migrations into the new Docker Postgres volume (`docker compose exec api python manage.py migrate`)
 
 ---
+
+## Scale Suitability (verified 2026-06-22)
+
+Both small clinics and large hospitals are supported without code changes. Key design points:
+
+| Concern | How it's handled |
+|---------|-----------------|
+| Small hospital with no wards | `Admission.bed` is nullable — admit without any ward/bed setup |
+| Large hospital with many wards | Ward select dropdown (not tabs) in UI; no pagination needed on wards (rarely >30) |
+| Clinical features not needed | `clinical_module_enabled = False` (default) — locks escalations, workflows, clinical AI at the service layer |
+| Self-service hospital setup | Ward + bed CRUD endpoints (ADMIN+ only) — no Django admin needed |
+| Frontend knowing feature flags | `GET /api/v1/hospital/` exposes `clinical_module_enabled` for sidebar gating |
+| Data isolation between hospitals | All queries are hospital-scoped via `user.hospital`; SUPERADMIN sees all |
 
 ## Known Issues / Tech Debt
 

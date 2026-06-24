@@ -3,7 +3,7 @@ from django.utils.timezone import now
 from apps.core.exceptions import ConflictError
 from apps.core.exceptions import ValidationError as AppValidationError
 from apps.core.models import Hospital
-from apps.patients.models import Admission, Bed, Patient
+from apps.patients.models import Admission, Bed, Patient, Ward
 from apps.users.constants import UserRole
 
 
@@ -81,6 +81,55 @@ def admit_patient(
         bed.is_occupied = True
         bed.save(update_fields=["is_occupied"])
     return admission
+
+
+def get_ward_queryset(*, user):
+    if user.role == UserRole.SUPERADMIN:
+        return Ward.objects.select_related("hospital").all()
+    return Ward.objects.filter(hospital=user.hospital)
+
+
+def create_ward(*, user, hospital, name: str, capacity: int) -> Ward:
+    return Ward.objects.create(
+        name=name,
+        hospital=hospital,
+        capacity=capacity,
+        created_by=user,
+        updated_by=user,
+    )
+
+
+def update_ward(*, user, ward: Ward, **kwargs) -> Ward:
+    for field, value in kwargs.items():
+        setattr(ward, field, value)
+    ward.updated_by = user
+    ward.save()
+    return ward
+
+
+def create_bed(*, user, ward: Ward, number: str) -> Bed:
+    if Bed.objects.filter(ward=ward, number=number).exists():
+        raise ConflictError(f"Bed '{number}' already exists in this ward.")
+    return Bed.objects.create(
+        number=number,
+        ward=ward,
+        created_by=user,
+        updated_by=user,
+    )
+
+
+def update_bed(*, user, bed: Bed, **kwargs) -> Bed:
+    for field, value in kwargs.items():
+        setattr(bed, field, value)
+    bed.updated_by = user
+    bed.save()
+    return bed
+
+
+def delete_bed(*, user, bed: Bed) -> None:
+    if bed.is_occupied:
+        raise AppValidationError("Cannot delete an occupied bed.")
+    bed.delete()
 
 
 def discharge_patient(*, user, patient: Patient) -> Admission:

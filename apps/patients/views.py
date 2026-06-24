@@ -5,24 +5,35 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.exceptions import NotFoundError, PermissionDeniedError
+from apps.core.exceptions import ValidationError as AppValidationError
 from apps.core.helpers import StandardPagination
 from apps.patients.models import Admission, Bed, Patient, Ward
 from apps.patients.permissions import IsAdminOrAbove, IsNurseOrAbove
 from apps.patients.serializers import (
     AdmissionSerializer,
     AdmitSerializer,
+    BedCreateSerializer,
     BedSerializer,
+    BedUpdateSerializer,
     PatientCreateSerializer,
     PatientSerializer,
     PatientUpdateSerializer,
+    WardCreateSerializer,
     WardSerializer,
+    WardUpdateSerializer,
 )
 from apps.patients.services import (
     admit_patient,
+    create_bed,
     create_patient,
+    create_ward,
+    delete_bed,
     discharge_patient,
     get_patient_queryset,
+    get_ward_queryset,
+    update_bed,
     update_patient,
+    update_ward,
 )
 from apps.users.constants import UserRole
 
@@ -131,23 +142,98 @@ class PatientAdmissionsView(APIView):
 
 
 class WardListView(APIView):
-    permission_classes = [IsAuthenticated]
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return [IsAdminOrAbove()]
+        return [IsAuthenticated()]
 
     def get(self, request):
-        if request.user.role == UserRole.SUPERADMIN:
-            wards = Ward.objects.select_related("hospital").all()
-        else:
-            wards = Ward.objects.filter(hospital=request.user.hospital)
-        return Response(WardSerializer(wards, many=True).data)
+        return Response(WardSerializer(get_ward_queryset(user=request.user), many=True).data)
+
+    def post(self, request):
+        hospital = request.user.hospital
+        if hospital is None:
+            raise PermissionDeniedError("Your account is not associated with a hospital.")
+        serializer = WardCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        ward = create_ward(user=request.user, hospital=hospital, **serializer.validated_data)
+        return Response(WardSerializer(ward).data, status=status.HTTP_201_CREATED)
+
+
+class WardDetailView(APIView):
+    def get_permissions(self):
+        if self.request.method == "GET":
+            return [IsAuthenticated()]
+        return [IsAdminOrAbove()]
+
+    def _get_ward_or_404(self, pk):
+        try:
+            return get_ward_queryset(user=self.request.user).get(pk=pk)
+        except Ward.DoesNotExist:
+            raise NotFoundError("Ward not found.")
+
+    def get(self, request, pk):
+        return Response(WardSerializer(self._get_ward_or_404(pk)).data)
+
+    def patch(self, request, pk):
+        ward = self._get_ward_or_404(pk)
+        serializer = WardUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        ward = update_ward(user=request.user, ward=ward, **serializer.validated_data)
+        return Response(WardSerializer(ward).data)
+
+    def delete(self, request, pk):
+        ward = self._get_ward_or_404(pk)
+        if ward.beds.filter(is_occupied=True).exists():
+            raise AppValidationError("Cannot delete a ward with occupied beds.")
+        ward.soft_delete(user=request.user)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class WardBedsView(APIView):
-    permission_classes = [IsAuthenticated]
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return [IsAdminOrAbove()]
+        return [IsAuthenticated()]
 
-    def get(self, request, ward_pk):
-        ward_qs = Ward.objects.all() if request.user.role == UserRole.SUPERADMIN else Ward.objects.filter(hospital=request.user.hospital)
+    def _get_ward_or_404(self, ward_pk):
         try:
-            ward = ward_qs.get(pk=ward_pk)
+            return get_ward_queryset(user=self.request.user).get(pk=ward_pk)
         except Ward.DoesNotExist:
             raise NotFoundError("Ward not found.")
+
+    def get(self, request, ward_pk):
+        ward = self._get_ward_or_404(ward_pk)
         return Response(BedSerializer(ward.beds.all(), many=True).data)
+
+    def post(self, request, ward_pk):
+        ward = self._get_ward_or_404(ward_pk)
+        serializer = BedCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        bed = create_bed(user=request.user, ward=ward, **serializer.validated_data)
+        return Response(BedSerializer(bed).data, status=status.HTTP_201_CREATED)
+
+
+class BedDetailView(APIView):
+    permission_classes = [IsAdminOrAbove]
+
+    def _get_bed_or_404(self, pk):
+        qs = Bed.objects.select_related("ward__hospital")
+        if self.request.user.role != UserRole.SUPERADMIN:
+            qs = qs.filter(ward__hospital=self.request.user.hospital)
+        try:
+            return qs.get(pk=pk)
+        except Bed.DoesNotExist:
+            raise NotFoundError("Bed not found.")
+
+    def patch(self, request, pk):
+        bed = self._get_bed_or_404(pk)
+        serializer = BedUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        bed = update_bed(user=request.user, bed=bed, **serializer.validated_data)
+        return Response(BedSerializer(bed).data)
+
+    def delete(self, request, pk):
+        bed = self._get_bed_or_404(pk)
+        delete_bed(user=request.user, bed=bed)
+        return Response(status=status.HTTP_204_NO_CONTENT)

@@ -401,6 +401,7 @@ Response `200`: `{"access": "<jwt>", "refresh": "<jwt>"}`
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
+| `GET` | `/hospital/` | required | Current user's hospital config (includes `clinical_module_enabled`) |
 | `GET` | `/patients/` | required | List (hospital-scoped, paginated). Params: `search` (MRN), `ward`, `status` (active\|discharged) |
 | `POST` | `/patients/` | ADMIN+ | Create patient record |
 | `GET` | `/patients/<id>/` | required | Patient detail |
@@ -411,7 +412,14 @@ Response `200`: `{"access": "<jwt>", "refresh": "<jwt>"}`
 | `GET` | `/patients/<id>/admissions/` | required | Admission history |
 | `GET` | `/patients/<id>/events/` | required | Clinical event timeline; params: `event_type`, `date_from`, `date_to` |
 | `GET` | `/wards/` | required | List wards for the hospital |
-| `GET` | `/wards/<id>/beds/` | required | List beds and occupancy |
+| `POST` | `/wards/` | ADMIN+ | Create ward |
+| `GET` | `/wards/<id>/` | required | Ward detail |
+| `PATCH` | `/wards/<id>/` | ADMIN+ | Update ward name or capacity |
+| `DELETE` | `/wards/<id>/` | ADMIN+ | Soft-delete ward (guard: no occupied beds) |
+| `GET` | `/wards/<id>/beds/` | required | List beds in ward |
+| `POST` | `/wards/<id>/beds/` | ADMIN+ | Add bed to ward |
+| `PATCH` | `/beds/<id>/` | ADMIN+ | Update bed number |
+| `DELETE` | `/beds/<id>/` | ADMIN+ | Hard-delete bed (guard: not occupied) |
 
 ---
 

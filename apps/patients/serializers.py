@@ -66,6 +66,24 @@ class AdmissionSerializer(serializers.ModelSerializer):
         ]
 
 
+class WardCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=100)
+    capacity = serializers.IntegerField(min_value=1)
+
+
+class WardUpdateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=100, required=False)
+    capacity = serializers.IntegerField(min_value=1, required=False)
+
+
+class BedCreateSerializer(serializers.Serializer):
+    number = serializers.CharField(max_length=20)
+
+
+class BedUpdateSerializer(serializers.Serializer):
+    number = serializers.CharField(max_length=20, required=False)
+
+
 class AdmitSerializer(serializers.Serializer):
     bed = serializers.PrimaryKeyRelatedField(
         queryset=Bed.objects.all(),
