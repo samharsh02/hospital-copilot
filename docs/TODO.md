@@ -13,9 +13,10 @@ This file is the single source of truth for what's done, what's next, and what's
 - [x] Backend `Dockerfile` (python:3.11-slim; entrypoint runs migrate then starts gunicorn)
 - [x] `docker-compose.yml` — services: db (postgres:15), redis:7, api, celery, frontend, nginx
 - [x] `nginx/nginx.conf` — routes `/api/` + `/ws/` to api:8000, `/` to frontend container
-- [x] Frontend scaffolded at `frontend/` — React 18 + Vite 6 + TypeScript; auth layer wired
+- [x] Frontend fully implemented at `frontend/` — React 19 + Vite 8 + TypeScript + React Router v7; all 10 pages live
 - [x] Frontend `Dockerfile` — multi-stage: Node 20 build → nginx:alpine serve
 - [x] Frontend repo at https://github.com/samharsh02/hospital-copilot-ui.git (main branch)
+- [x] **Full stack deployed and running** at `http://172.16.232.103` — all containers healthy, all migrations applied
 - [x] Python 3.11.9 compiled from source (with OpenSSL 1.1.1k) — superseded by Docker
 - [x] PostgreSQL 15 installed and running on host — superseded by Docker volume
 - [x] Redis 7.2 installed and running on host — superseded by Docker container
@@ -40,6 +41,25 @@ This file is the single source of truth for what's done, what's next, and what's
 - [x] Token blacklist (`rest_framework_simplejwt.token_blacklist`)
 - [x] Migration (`0001_initial`)
 - [x] Tests — 30 passing (service + view layer)
+
+### Frontend — React SPA ✅ DONE (2026-06-24, deployed 2026-06-29)
+
+- [x] React Router v7 with protected routes; unauthenticated → redirect to `/login`
+- [x] Dark sidebar (#0D1117) with SVG icons; clinical nav items (Workflows, AI Intelligence) locked when `clinical_module_enabled=false`
+- [x] Hospital config store — fetches `GET /api/v1/hospital/` once after login, caches `clinical_module_enabled`
+- [x] **Login page** — professional form, JWT login, redirects to dashboard on success
+- [x] **Dashboard** — 4 stat cards (active patients, open alerts, active workflows, bed occupancy), recent alerts panel, recent admissions panel
+- [x] **Patients list** — search by MRN/name, filter by status + ward, paginated table; Add Patient modal (ADMIN+)
+- [x] **Patient detail** — demographics card, admit/discharge actions (role-gated), 3 tabs: Timeline (clinical events), Workflows, AI Intelligence
+- [x] **Beds & Wards** — ward cards with occupancy bars (green→amber→red at 70%/90%), bed table per ward, Add/Edit/Delete ward + bed (ADMIN+); small-hospital empty state
+- [x] **Alerts** — tabbed by status (All/Open/Acknowledged/Resolved), priority + status badges, acknowledge (NURSE+) / resolve (DOCTOR+) actions, auto-refresh every 30s
+- [x] **Workflows list** — Instances tab (status filter, step progress) + Templates tab (ADMIN+ create/edit/delete with dynamic step builder)
+- [x] **Workflow detail** — sequential step checklist, complete step (NURSE+), cancel workflow
+- [x] **AI Intelligence** — patient search, prompt type selector (PATIENT_SUMMARY/DISCHARGE_READINESS always; RISK_FLAG/CLINICAL_SUMMARY clinical-module only), 5s polling for PENDING, response history with disclaimer
+- [x] **Notifications** — kind badges, unread accent, mark read / mark all read, relative timestamps
+- [x] WebSocket hook (`wss://.../ws/notifications/?token=`) — graceful fallback if unavailable
+- [x] Role-gated UI: ADMIN+ for create/delete, NURSE+ for admit/acknowledge/step completion, DOCTOR+ for resolve
+- [x] Typed API layer: 7 modules (hospital, patients, wards, alerts, workflows, intelligence, notifications)
 
 ---
 
@@ -170,13 +190,28 @@ Connect to hospital HIS/EMR systems, lab systems, etc.
 
 ---
 
-## Infrastructure Remaining
+## Remaining
 
-- [ ] **TLS certificate** — Let's Encrypt (certbot) or provide a cert; needed before external traffic. Add HTTPS listener to nginx/nginx.conf and update ALLOWED_HOSTS.
-- [ ] **Firewall** — `firewalld` rules: open 80 (and 443 after TLS); keep 8000 internal only (nginx handles external traffic now)
-- [ ] **Change admin password** — default is `changeme123!`, must be changed before external exposure
-- [ ] **Set `ANTHROPIC_API_KEY`** in `/opt/hospital-copilot/.env` on the server
-- [ ] **Migrate existing PostgreSQL data** — current data is in the host PostgreSQL; after `docker compose up`, run migrations into the new Docker Postgres volume (`docker compose exec api python manage.py migrate`)
+### Infrastructure
+
+- [ ] **TLS certificate** — Let's Encrypt (certbot) or provide a cert; needed before external traffic. Add HTTPS listener to `nginx/nginx.conf`, set `SECURE_SSL_REDIRECT=True`, `SESSION_COOKIE_SECURE=True`, `CSRF_COOKIE_SECURE=True` in `.env`.
+- [ ] **Firewall** — `firewalld` rules: open 80 + 443; block direct access to 8000, 5432, 6379 from outside.
+- [ ] **Change admin password** — default is `changeme123!`; run `docker compose exec api python manage.py changepassword admin` before external exposure.
+- [ ] **Set `ANTHROPIC_API_KEY`** — add to `/opt/hospital-copilot/.env` then `docker compose up -d --no-deps api celery` to pick it up. Without this, all AI Intelligence queries will fail.
+
+### `apps/integrations` — External system connectors
+
+- [ ] Design TBD — depends on which external systems are in scope
+- [ ] Likely: HL7 FHIR ingest endpoint, outbound webhook delivery
+- [ ] Placeholder until requirements are clearer
+
+### Frontend polish (post-MVP)
+
+- [ ] **Settings page** — allow ADMIN to update hospital profile, enable/disable clinical module, manage users
+- [ ] **User management** — list users, create/deactivate, assign roles (currently only via Django admin or API)
+- [ ] **Escalation rules UI** — currently rules can only be created via the API (`POST /api/v1/escalation-rules/`); add a UI page under Alerts or Settings
+- [ ] **Offline / error states** — network error banners, retry buttons
+- [ ] **Pagination** — Patients and Notifications pages have paginated APIs but the UI currently only shows the first page
 
 ---
 
@@ -199,4 +234,5 @@ Both small clinics and large hospitals are supported without code changes. Key d
 - Python 3.11 source still in `/tmp/Python-3.11.9` on server (~200 MB); safe to delete (build now uses Docker)
 - Test suite uses `--no-migrations` (syncdb); migration smoke tests against a real DB are not covered
 - `DJANGO_SETTINGS_MODULE` is hardcoded to `production` in the Dockerfile `ENV`; override via compose env if dev image is needed
-- Frontend has no router yet (`react-router-dom` not installed); only Login and Dashboard pages exist as a scaffold
+- Docker build layer caching can cause `--no-cache` to be needed after a `git pull` adds new files in directories already cached — seen with `0002_alter_patient_options.py`
+- Nginx caches upstream IPs at reload time; after `--force-recreate` containers get new IPs and nginx needs `nginx -s reload` to resolve fresh DNS
